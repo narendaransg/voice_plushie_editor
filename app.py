@@ -1,11 +1,22 @@
 import argparse
+import re
 import sys
 from pathlib import Path
 from typing import Optional
 
 from PySide6.QtWidgets import QApplication, QPushButton, QMessageBox, QHBoxLayout, QComboBox
 
-from core.input_windows import check_target_window, send_key_combo
+from core.input_windows import (
+    check_target_window,
+    send_key_combo,
+    move_mouse_relative,
+    mouse_click,
+    mouse_double_click,
+    mouse_down,
+    mouse_up,
+    mouse_scroll,
+)
+from core.nose_tracker import NoseTrackerWorker
 from core.voice_worker import VoiceListenerWorker
 from ui.plushie_overlay import PlushieOverlayWindow
 from ui.theme_wizard import ThemeWizard
@@ -13,13 +24,18 @@ from ui.pack_builder import PackBuilderDialog
 
 
 class PlushieController:
-    """Connects the plushie overlay, pack builder, theme wizard, voice listener, and input sender."""
+    """Connects the plushie overlay, pack builder, theme wizard, voice listener, nose tracker, and input sender."""
 
     def __init__(self, root_dir: Path, enable_voice: bool = True):
         self.root_dir = Path(root_dir)
         self.enable_voice = enable_voice
 
         self.overlay = PlushieOverlayWindow(self.root_dir)
+        self.nose_worker = NoseTrackerWorker()
+        self.nose_worker.delta_ready.connect(self._on_nose_delta)
+        self.nose_worker.status_changed.connect(self._on_voice_status)
+        self.nose_worker.error_occurred.connect(self._on_voice_error)
+
         self._add_extra_controls()
 
         self._pending_confirm: Optional[dict] = None
@@ -57,7 +73,26 @@ class PlushieController:
         wizard_btn.clicked.connect(self.open_theme_wizard)
         row.addWidget(wizard_btn)
 
+        self.nose_btn = QPushButton("Nose: Off")
+        self.nose_btn.setCheckable(True)
+        self.nose_btn.clicked.connect(self.toggle_nose_tracking)
+        row.addWidget(self.nose_btn)
+
         layout.addLayout(row)
+
+    def toggle_nose_tracking(self, checked: Optional[bool] = None) -> None:
+        active = self.nose_btn.isChecked() if checked is None else bool(checked)
+        self.nose_btn.setChecked(active)
+        if active:
+            self.nose_btn.setText("Nose: On")
+            self.nose_worker.start()
+        else:
+            self.nose_btn.setText("Nose: Off")
+            self.nose_worker.stop()
+            self.overlay.status_label.setText("Nose tracking paused.")
+
+    def _on_nose_delta(self, dx: int, dy: int) -> None:
+        move_mouse_relative(dx, dy)
 
     def _refresh_theme_combo(self) -> None:
         self.theme_combo.blockSignals(True)
@@ -101,9 +136,70 @@ class PlushieController:
         self.overlay.status_label.setText(msg)
 
     def _on_voice_error(self, err: str) -> None:
-        self.overlay.status_label.setText(f"Voice notice: {err}")
+        if self.nose_btn.isChecked() and ("webcam" in err.lower() or "cv2" in err.lower() or "nose" in err.lower()):
+            self.nose_btn.setChecked(False)
+            self.nose_btn.setText("Nose: Off")
+        self.overlay.status_label.setText(f"Voice/Cursor notice: {err}")
+
+    def _handle_cursor_utterance(self, utterance: str) -> Optional[dict]:
+        text = re.sub(r"\s+", " ", utterance.lower()).strip()
+        step = 180 if any(w in text for w in ("far", "big", "lot", "fast")) else 60
+
+        if text in ("nose on", "start nose", "enable nose"):
+            self.toggle_nose_tracking(True)
+            return {"status": "cursor", "message": "Nose tracking enabled."}
+        if text in ("nose off", "stop nose", "disable nose", "freeze cursor"):
+            self.toggle_nose_tracking(False)
+            return {"status": "cursor", "message": "Nose tracking disabled."}
+        if "recenter" in text or "reset nose" in text:
+            self.nose_worker.recenter()
+            return {"status": "cursor", "message": "Nose center reset."}
+
+        if "double click" in text:
+            ok, detail = mouse_double_click()
+            return {"status": "cursor", "message": detail if ok else detail}
+        if "right click" in text:
+            ok, detail = mouse_click("right")
+            return {"status": "cursor", "message": detail if ok else detail}
+        if any(k in text for k in ("hold click", "mouse down", "drag start")):
+            ok, detail = mouse_down("left")
+            return {"status": "cursor", "message": detail if ok else detail}
+        if any(k in text for k in ("release", "mouse up", "drop", "let go")):
+            ok, detail = mouse_up("left")
+            return {"status": "cursor", "message": detail if ok else detail}
+        if text in ("click", "left click", "tap"):
+            ok, detail = mouse_click("left")
+            return {"status": "cursor", "message": detail if ok else detail}
+
+        if "scroll up" in text:
+            ok, detail = mouse_scroll(240)
+            return {"status": "cursor", "message": detail if ok else detail}
+        if "scroll down" in text:
+            ok, detail = mouse_scroll(-240)
+            return {"status": "cursor", "message": detail if ok else detail}
+
+        if "move left" in text or "go left" in text:
+            ok, detail = move_mouse_relative(-step, 0)
+            return {"status": "cursor", "message": detail if ok else detail}
+        if "move right" in text or "go right" in text:
+            ok, detail = move_mouse_relative(step, 0)
+            return {"status": "cursor", "message": detail if ok else detail}
+        if "move up" in text or "go up" in text:
+            ok, detail = move_mouse_relative(0, -step)
+            return {"status": "cursor", "message": detail if ok else detail}
+        if "move down" in text or "go down" in text:
+            ok, detail = move_mouse_relative(0, step)
+            return {"status": "cursor", "message": detail if ok else detail}
+
+        return None
 
     def on_utterance(self, utterance: str, window_ok: Optional[bool] = None, text_input_focused: bool = False) -> dict:
+        cursor_res = self._handle_cursor_utterance(utterance)
+        if cursor_res is not None:
+            self.overlay._apply_theme_and_modes()
+            self.overlay.status_label.setText(cursor_res.get("message", ""))
+            return cursor_res
+
         engine = self.overlay.engine
         app_key = engine.settings.get("active_app", "capcut")
         profile = engine.profiles.get(app_key, {})
@@ -152,6 +248,7 @@ class PlushieController:
         return result
 
     def shutdown(self) -> None:
+        self.nose_worker.stop()
         if self.voice_worker is not None:
             self.voice_worker.stop()
         self.overlay.close()

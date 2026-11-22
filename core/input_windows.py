@@ -13,7 +13,16 @@ if IS_WINDOWS:
     INPUT_MOUSE = 0
     INPUT_KEYBOARD = 1
     INPUT_HARDWARE = 2
+
     KEYEVENTF_KEYUP = 0x0002
+
+    MOUSEEVENTF_MOVE = 0x0001
+    MOUSEEVENTF_LEFTDOWN = 0x0002
+    MOUSEEVENTF_LEFTUP = 0x0004
+    MOUSEEVENTF_RIGHTDOWN = 0x0008
+    MOUSEEVENTF_RIGHTUP = 0x0010
+    MOUSEEVENTF_WHEEL = 0x0800
+    WHEEL_DELTA = 120
 
     VK_MAP = {
         "backspace": 0x08,
@@ -86,6 +95,83 @@ if IS_WINDOWS:
             ("type", wintypes.DWORD),
             ("union", _INPUTunion),
         ]
+
+
+def _send_mouse_inputs(items: List[Tuple[int, int, int]]) -> Tuple[bool, str]:
+    if not IS_WINDOWS:
+        return True, f"[Dry-run] Mouse actions: {len(items)}"
+    inputs = []
+    for dx, dy, flags in items:
+        mi = MOUSEINPUT(dx=int(dx), dy=int(dy), mouseData=0, dwFlags=flags, time=0, dwExtraInfo=0)
+        inputs.append(INPUT(type=INPUT_MOUSE, union=_INPUTunion(mi=mi)))
+    arr = (INPUT * len(inputs))(*inputs)
+    sent = user32.SendInput(len(inputs), arr, ctypes.sizeof(INPUT))
+    if sent != len(inputs):
+        err = ctypes.get_last_error()
+        return False, f"Windows mouse SendInput failed (sent={sent}/{len(inputs)}, winerr={err})."
+    return True, "OK"
+
+
+def move_mouse_relative(dx: int, dy: int) -> Tuple[bool, str]:
+    """Move mouse cursor relative to current position."""
+    if dx == 0 and dy == 0:
+        return True, "No movement"
+    ok, detail = _send_mouse_inputs([(int(dx), int(dy), MOUSEEVENTF_MOVE)])
+    if not ok:
+        return False, detail
+    return True, f"Moved cursor ({int(dx)}, {int(dy)})"
+
+
+def mouse_click(button: str = "left") -> Tuple[bool, str]:
+    """Perform a single left or right mouse click."""
+    btn = (button or "left").lower()
+    if btn == "right":
+        down_flag, up_flag, label = MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, "right click"
+    else:
+        down_flag, up_flag, label = MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, "left click"
+    ok, detail = _send_mouse_inputs([(0, 0, down_flag), (0, 0, up_flag)])
+    time.sleep(0.02)
+    return (True, f"Sent {label}") if ok else (False, detail)
+
+
+def mouse_double_click() -> Tuple[bool, str]:
+    """Perform a double left-click."""
+    ok, detail = _send_mouse_inputs([
+        (0, 0, MOUSEEVENTF_LEFTDOWN),
+        (0, 0, MOUSEEVENTF_LEFTUP),
+        (0, 0, MOUSEEVENTF_LEFTDOWN),
+        (0, 0, MOUSEEVENTF_LEFTUP),
+    ])
+    time.sleep(0.03)
+    return (True, "Sent double click") if ok else (False, detail)
+
+
+def mouse_down(button: str = "left") -> Tuple[bool, str]:
+    """Press and hold mouse button."""
+    flag = MOUSEEVENTF_RIGHTDOWN if (button or "left").lower() == "right" else MOUSEEVENTF_LEFTDOWN
+    ok, detail = _send_mouse_inputs([(0, 0, flag)])
+    return (True, "Holding click") if ok else (False, detail)
+
+
+def mouse_up(button: str = "left") -> Tuple[bool, str]:
+    """Release held mouse button."""
+    flag = MOUSEEVENTF_RIGHTUP if (button or "left").lower() == "right" else MOUSEEVENTF_LEFTUP
+    ok, detail = _send_mouse_inputs([(0, 0, flag)])
+    return (True, "Released click") if ok else (False, detail)
+
+
+def mouse_scroll(wheel_delta: int = WHEEL_DELTA) -> Tuple[bool, str]:
+    """Scroll vertical wheel by wheel_delta (positive up, negative down)."""
+    if not IS_WINDOWS:
+        return True, f"[Dry-run] Scroll {wheel_delta}"
+    mi = MOUSEINPUT(dx=0, dy=0, mouseData=ctypes.c_uint(wheel_delta).value, dwFlags=MOUSEEVENTF_WHEEL, time=0, dwExtraInfo=0)
+    inp = INPUT(type=INPUT_MOUSE, union=_INPUTunion(mi=mi))
+    arr = (INPUT * 1)(inp)
+    sent = user32.SendInput(1, arr, ctypes.sizeof(INPUT))
+    if sent != 1:
+        err = ctypes.get_last_error()
+        return False, f"Windows scroll SendInput failed (winerr={err})."
+    return True, f"Scrolled {'up' if wheel_delta > 0 else 'down'}"
 
 
 def get_active_window_title() -> str:
