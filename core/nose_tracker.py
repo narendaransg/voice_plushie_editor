@@ -38,6 +38,9 @@ class NoseTrackerWorker(QObject):
         self._smooth_dy = 0.0
         self._rem_x = 0.0
         self._rem_y = 0.0
+        self._prev_off_x = 0.0
+        self._prev_off_y = 0.0
+        self.max_step = 6
 
     def recenter(self) -> None:
         self._anchor = None
@@ -327,21 +330,41 @@ class NoseTrackerWorker(QObject):
 
                 off_x = pos[0] - self._anchor[0]
                 off_y = pos[1] - self._anchor[1]
-                eff_gain_x = self.gain_x * (self.right_boost if off_x > 0 else 1.0)
+
+                # Gently adapt anchor when head is nearly back to center so posture doesn't pull to corner
+                if abs(off_x) < 0.032 and abs(off_y) < 0.032:
+                    self._anchor = (
+                        self._anchor[0] + (pos[0] - self._anchor[0]) * 0.015,
+                        self._anchor[1] + (pos[1] - self._anchor[1]) * 0.015,
+                    )
+                    off_x = pos[0] - self._anchor[0]
+                    off_y = pos[1] - self._anchor[1]
+
+                # Dampen continuous drift when holding a static angle (little change from previous offset)
+                vel_x = abs(off_x - self._prev_off_x)
+                vel_y = abs(off_y - self._prev_off_y)
+                self._prev_off_x = off_x
+                self._prev_off_y = off_y
+
+                hold_scale_x = 1.0 if vel_x > 0.004 else 0.25
+                hold_scale_y = 1.0 if vel_y > 0.004 else 0.25
+
+                eff_gain_x = self.gain_x * (self.right_boost if off_x > 0 else 1.0) * 0.55 * hold_scale_x
+                eff_gain_y = self.gain_y * 0.55 * hold_scale_y
 
                 raw_dx = self._linear_step(off_x, eff_gain_x)
-                raw_dy = self._linear_step(off_y, self.gain_y)
+                raw_dy = self._linear_step(off_y, eff_gain_y)
 
-                self._smooth_dx += (raw_dx - self._smooth_dx) * self.smoothing
-                self._smooth_dy += (raw_dy - self._smooth_dy) * self.smoothing
+                self._smooth_dx += (raw_dx - self._smooth_dx) * 0.45
+                self._smooth_dy += (raw_dy - self._smooth_dy) * 0.45
 
                 total_x = self._smooth_dx + self._rem_x
                 total_y = self._smooth_dy + self._rem_y
 
-                dx_int = int(round(total_x))
-                dy_int = int(round(total_y))
-                self._rem_x = total_x - dx_int
-                self._rem_y = total_y - dy_int
+                dx_int = max(-self.max_step, min(self.max_step, int(round(total_x))))
+                dy_int = max(-self.max_step, min(self.max_step, int(round(total_y))))
+                self._rem_x = max(-2.0, min(2.0, total_x - dx_int))
+                self._rem_y = max(-2.0, min(2.0, total_y - dy_int))
 
                 if dx_int != 0 or dy_int != 0:
                     self.delta_ready.emit(dx_int, dy_int)
