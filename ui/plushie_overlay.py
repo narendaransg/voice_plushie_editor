@@ -202,6 +202,7 @@ class PlushieOverlayWindow(QWidget):
 
         self.status_label = QLabel(self.engine.prompt("listening"))
         self.status_label.setWordWrap(True)
+        self.status_label.setMinimumHeight(44)
         self.status_label.setFont(QFont("Segoe UI", 9))
         panel_layout.addWidget(self.status_label)
 

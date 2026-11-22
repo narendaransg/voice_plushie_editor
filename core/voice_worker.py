@@ -18,7 +18,7 @@ class VoiceListenerWorker(QObject):
         self,
         get_settings: Callable[[], dict],
         sample_rate: int = 16000,
-        chunk_seconds: float = 2.5,
+        chunk_seconds: float = 2.0,
         vosk_model_dir: Optional[Path] = None,
     ):
         super().__init__(None)
@@ -62,9 +62,8 @@ class VoiceListenerWorker(QObject):
 
         try:
             from faster_whisper import WhisperModel
-        except Exception as exc:
+        except Exception:
             self._whisper_unavailable = True
-            self.status_changed.emit(f"Whisper unavailable ({exc}); using Vosk fallback.")
             return None
 
         device = "cuda" if sig[0] == "gpu" else "cpu"
@@ -81,7 +80,7 @@ class VoiceListenerWorker(QObject):
 
         if not self.vosk_model_dir or not self.vosk_model_dir.exists():
             return None
-        self.status_changed.emit("Loading Vosk offline model...")
+        self.status_changed.emit("Loading Vosk model...")
         self._vosk_model = Model(str(self.vosk_model_dir))
         return self._vosk_model
 
@@ -98,7 +97,7 @@ class VoiceListenerWorker(QObject):
 
     def _transcribe_pcm(self, pcm_bytes: bytes, mode: str) -> str:
         has_vosk_dir = bool(self.vosk_model_dir and self.vosk_model_dir.exists())
-        if mode == "cpu" and has_vosk_dir:
+        if has_vosk_dir and (mode == "cpu" or self._whisper_unavailable):
             return self._transcribe_with_vosk(pcm_bytes)
 
         import numpy as np
@@ -107,7 +106,7 @@ class VoiceListenerWorker(QObject):
         if audio_int16.size == 0:
             return ""
         rms = float(np.sqrt(np.mean(audio_int16.astype(np.float32) ** 2)))
-        if rms < 250.0:
+        if rms < 200.0:
             return ""
 
         model = self._ensure_whisper(mode)
@@ -118,27 +117,34 @@ class VoiceListenerWorker(QObject):
         segments, _ = model.transcribe(audio_float32, beam_size=1, vad_filter=True)
         return " ".join(seg.text.strip() for seg in segments if seg.text.strip()).strip()
 
-    def _apply_voice_mode_gate(self, text: str, settings: dict) -> Optional[str]:
+    def _apply_voice_mode_gate(self, text: str, settings: dict) -> tuple[Optional[str], str]:
         cleaned = re.sub(r"\s+", " ", text).strip()
         if not cleaned:
-            return None
+            return None, "Mic listening (no speech detected)"
 
         voice_mode = settings.get("voice_mode", "always_on")
         if voice_mode == "always_on":
-            return cleaned
+            return cleaned, f"Heard: '{cleaned}'"
 
         wake = (settings.get("wake_phrase") or "leon").strip().lower()
         lowered = cleaned.lower()
         if wake and wake in lowered:
             stripped = re.sub(rf"\b{re.escape(wake)}\b", "", lowered, flags=re.IGNORECASE).strip(" ,.!?")
-            return stripped if stripped else cleaned
-        return None
+            final_text = stripped if stripped else cleaned
+            return final_text, f"Wake '{wake}' heard: '{final_text}'"
+
+        return None, f"Heard '{cleaned}' (waiting for wake word '{wake}')"
 
     def _run_loop(self) -> None:
         try:
             import sounddevice as sd
         except Exception as exc:
             self.error_occurred.emit(f"Audio capture unavailable ('sounddevice' missing): {exc}")
+            return
+
+        has_vosk_dir = bool(self.vosk_model_dir and self.vosk_model_dir.exists())
+        if not has_vosk_dir:
+            self.error_occurred.emit(f"Vosk model folder missing at {self.vosk_model_dir}")
             return
 
         frames_per_chunk = int(self.sample_rate * self.chunk_seconds)
@@ -149,7 +155,7 @@ class VoiceListenerWorker(QObject):
                 dtype="int16",
                 channels=1,
             ) as stream:
-                self.status_changed.emit("Microphone active.")
+                self.status_changed.emit("Mic active (Vosk ready). Speak now...")
                 while not self._stop_event.is_set():
                     data, overflowed = stream.read(frames_per_chunk)
                     if overflowed:
@@ -167,8 +173,10 @@ class VoiceListenerWorker(QObject):
                         self.error_occurred.emit(f"STT error ({mode}): {exc}")
                         continue
 
-                    routed = self._apply_voice_mode_gate(raw_text, settings)
+                    routed, feedback = self._apply_voice_mode_gate(raw_text, settings)
                     if routed:
                         self.utterance_detected.emit(routed)
+                    else:
+                        self.status_changed.emit(feedback)
         except Exception as exc:
             self.error_occurred.emit(f"Microphone stream error: {exc}")
