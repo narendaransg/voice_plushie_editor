@@ -3,23 +3,24 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtWidgets import QApplication, QPushButton, QMessageBox
+from PySide6.QtWidgets import QApplication, QPushButton, QMessageBox, QHBoxLayout, QComboBox
 
 from core.input_windows import check_target_window, send_key_combo
 from core.voice_worker import VoiceListenerWorker
 from ui.plushie_overlay import PlushieOverlayWindow
 from ui.theme_wizard import ThemeWizard
+from ui.pack_builder import PackBuilderDialog
 
 
 class PlushieController:
-    """Connects the plushie overlay, theme wizard, voice listener, and input sender."""
+    """Connects the plushie overlay, pack builder, theme wizard, voice listener, and input sender."""
 
     def __init__(self, root_dir: Path, enable_voice: bool = True):
         self.root_dir = Path(root_dir)
         self.enable_voice = enable_voice
 
         self.overlay = PlushieOverlayWindow(self.root_dir)
-        self._add_wizard_button()
+        self._add_extra_controls()
 
         self._pending_confirm: Optional[dict] = None
         self.overlay.handle_utterance = self.on_utterance  # type: ignore[method-assign]
@@ -36,18 +37,63 @@ class PlushieController:
             self.voice_worker.error_occurred.connect(self._on_voice_error)
             self.voice_worker.start()
 
-    def _add_wizard_button(self) -> None:
+    def _add_extra_controls(self) -> None:
+        layout = self.overlay.panel.layout()
+        if layout is None:
+            return
+
+        row = QHBoxLayout()
+
+        self.theme_combo = QComboBox()
+        self._refresh_theme_combo()
+        self.theme_combo.currentIndexChanged.connect(self._on_theme_changed)
+        row.addWidget(self.theme_combo)
+
+        pack_btn = QPushButton("Pack Builder")
+        pack_btn.clicked.connect(self.open_pack_builder)
+        row.addWidget(pack_btn)
+
         wizard_btn = QPushButton("Theme Wizard")
         wizard_btn.clicked.connect(self.open_theme_wizard)
-        layout = self.overlay.panel.layout()
-        if layout is not None:
-            layout.addWidget(wizard_btn)
+        row.addWidget(wizard_btn)
+
+        layout.addLayout(row)
+
+    def _refresh_theme_combo(self) -> None:
+        self.theme_combo.blockSignals(True)
+        self.theme_combo.clear()
+        themes_dir = self.root_dir / "themes"
+        if themes_dir.exists():
+            for d in sorted(themes_dir.iterdir()):
+                if (d / "theme.json").exists():
+                    self.theme_combo.addItem(d.name, d.name)
+        active = self.overlay.engine.settings.get("active_theme", "re_leon")
+        idx = self.theme_combo.findData(active)
+        if idx >= 0:
+            self.theme_combo.setCurrentIndex(idx)
+        self.theme_combo.blockSignals(False)
+
+    def _on_theme_changed(self) -> None:
+        theme_id = self.theme_combo.currentData()
+        if not theme_id:
+            return
+        self.overlay.engine.theme, self.overlay.engine.prompts = self.overlay.engine.load_theme(theme_id)
+        self.overlay.engine.save_settings()
+        self.overlay._apply_theme_and_modes()
+        self.overlay.status_label.setText(self.overlay.engine.prompt("listening"))
+
+    def open_pack_builder(self) -> None:
+        dlg = PackBuilderDialog(self.root_dir, parent=self.overlay)
+        dlg.exec()
+        self.overlay.engine.profiles = self.overlay.engine._load_profiles()
+        self.overlay.status_label.setText("Command packs reloaded.")
 
     def open_theme_wizard(self) -> None:
         wizard = ThemeWizard(self.root_dir, parent=self.overlay)
         if wizard.exec():
+            self._refresh_theme_combo()
             active_id = self.overlay.engine.settings.get("active_theme", "re_leon")
-            self.overlay.engine.load_theme(active_id)
+            self.overlay.engine.theme, self.overlay.engine.prompts = self.overlay.engine.load_theme(active_id)
             self.overlay._apply_theme_and_modes()
             self.overlay.status_label.setText(self.overlay.engine.prompt("listening"))
 
@@ -77,7 +123,7 @@ class PlushieController:
             keys = result.get("keys", [])
             if result.get("requires_confirm"):
                 self._pending_confirm = result
-                msg = f"Confirm '{result.get('command')}' [{ '+'.join(keys) }]? Click Yes or say confirm."
+                msg = f"Confirm '{result.get('command')}' [{'+'.join(keys)}]? Click Yes to run."
                 self.overlay._apply_theme_and_modes()
                 self.overlay.status_label.setText(msg)
                 reply = QMessageBox.question(
