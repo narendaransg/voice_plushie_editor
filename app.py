@@ -20,7 +20,6 @@ from core.input_windows import (
     mouse_up,
     mouse_scroll,
 )
-from core.nose_tracker import NoseTrackerWorker
 from core.voice_worker import VoiceListenerWorker
 from ui.plushie_overlay import PlushieOverlayWindow
 from ui.theme_wizard import ThemeWizard
@@ -43,7 +42,7 @@ WORD_NUMBERS = {
 
 
 class PlushieController:
-    """Connects overlay, numbered voice grid, continuous mover, keyboard nav, face tracker, and input sender."""
+    """Connects overlay, numbered voice grid, continuous mover, keyboard nav, voice listener, and input sender."""
 
     def __init__(self, root_dir: Path, enable_voice: bool = True):
         self.root_dir = Path(root_dir)
@@ -52,14 +51,6 @@ class PlushieController:
         self.overlay = PlushieOverlayWindow(self.root_dir)
         self.grid_overlay = VoiceGridOverlay(cols=8, rows=6)
 
-        self._is_calibrating = False
-        self.nose_worker = NoseTrackerWorker()
-        self.nose_worker.calibration_state_changed.connect(self._on_calibration_state_changed)
-        self.nose_worker.delta_ready.connect(self._on_nose_delta)
-        self.nose_worker.status_changed.connect(self._on_voice_status)
-        self.nose_worker.error_occurred.connect(self._on_voice_error)
-
-        # Continuous directional cursor / wheel hold state
         self._cont_dir: Optional[Tuple[int, int]] = None
         self._cont_scroll: int = 0
         self._cont_speed: int = 6
@@ -108,11 +99,6 @@ class PlushieController:
         self.grid_btn.clicked.connect(self.toggle_voice_grid)
         row.addWidget(self.grid_btn)
 
-        self.nose_btn = QPushButton("Nose: Off")
-        self.nose_btn.setCheckable(True)
-        self.nose_btn.clicked.connect(self.toggle_nose_tracking)
-        row.addWidget(self.nose_btn)
-
         layout.addLayout(row)
 
     def toggle_voice_grid(self) -> None:
@@ -123,23 +109,6 @@ class PlushieController:
             sw, sh = get_screen_size()
             self.grid_overlay.show_full_screen_grid(sw, sh)
             self.overlay.status_label.setText("Grid active (1–48): say a number, 'click 14', 'zoom grid', or 'hide grid'.")
-
-    def toggle_nose_tracking(self, checked: Optional[bool] = None) -> None:
-        active = self.nose_btn.isChecked() if checked is None else bool(checked)
-        self.nose_btn.setChecked(active)
-        if active:
-            self.nose_btn.setText("Nose: On")
-            self.nose_worker.start()
-        else:
-            self.nose_btn.setText("Nose: Off")
-            self.nose_worker.stop()
-            self.overlay.status_label.setText("Face tracking paused.")
-
-    def _on_calibration_state_changed(self, calibrating: bool) -> None:
-        self._is_calibrating = bool(calibrating)
-
-    def _on_nose_delta(self, dx: int, dy: int) -> None:
-        move_mouse_relative(dx, dy)
 
     def _on_continuous_tick(self) -> None:
         if self._cont_dir is not None:
@@ -209,23 +178,20 @@ class PlushieController:
         self.overlay.status_label.setText(msg)
 
     def _on_voice_error(self, err: str) -> None:
-        if self.nose_btn.isChecked() and ("webcam" in err.lower() or "cv2" in err.lower() or "face" in err.lower()):
-            self.nose_btn.setChecked(False)
-            self.nose_btn.setText("Nose: Off")
-        self.overlay.status_label.setText(f"Voice/Cursor notice: {err}")
+        self.overlay.status_label.setText(f"Voice notice: {err}")
 
     def _handle_cursor_utterance(self, utterance: str) -> Optional[dict]:
         text = re.sub(r"\s+", " ", utterance.lower()).strip()
         step = 180 if any(w in text for w in ("far", "big", "lot", "fast")) else 60
 
-        # 1. Stop continuous movement / hide grid
+        # 1. Stop continuous movement / scroll
         if text in ("stop", "halt", "freeze", "stop moving", "stop scrolling"):
             was_moving = self._cont_dir is not None or self._cont_scroll != 0
             self._stop_continuous()
             if was_moving:
                 return {"status": "cursor", "message": "Stopped continuous cursor/scroll motion."}
 
-        # 2. Named UI / Numbered Grid Overlay commands
+        # 2. Numbered Voice Grid Overlay commands
         if any(p in text for p in ("show grid", "open grid", "show numbers", "voice grid", "number grid")):
             sw, sh = get_screen_size()
             self.grid_overlay.show_full_screen_grid(sw, sh)
@@ -297,7 +263,7 @@ class PlushieController:
             self._cont_speed = max(2, self._cont_speed - 3)
             return {"status": "cursor", "message": f"Cursor glide speed set to {self._cont_speed}."}
 
-        # 4. Voice-Triggered Keyboard Navigation (no pointer needed)
+        # 4. Voice-Triggered Keyboard Navigation
         if text in ("shift tab", "back tab", "previous field"):
             ok, detail = send_key_combo(["shift", "tab"])
             return {"status": "cursor", "message": detail if ok else detail}
@@ -323,17 +289,7 @@ class PlushieController:
             ok, detail = send_key_combo(["esc"])
             return {"status": "cursor", "message": detail if ok else detail}
 
-        # 5. Face tracking & direct single-step cursor/click controls
-        if text in ("nose on", "start nose", "enable nose"):
-            self.toggle_nose_tracking(True)
-            return {"status": "cursor", "message": "Face tracking enabled."}
-        if text in ("nose off", "stop nose", "disable nose", "freeze cursor"):
-            self.toggle_nose_tracking(False)
-            return {"status": "cursor", "message": "Face tracking disabled."}
-        if "recenter" in text or "reset nose" in text or "calibrate" in text:
-            self.nose_worker.recenter()
-            return {"status": "cursor", "message": "Restarting calibration..."}
-
+        # 5. Direct single-step cursor / click / scroll controls
         if "double click" in text:
             ok, detail = mouse_double_click()
             return {"status": "cursor", "message": detail if ok else detail}
@@ -373,9 +329,6 @@ class PlushieController:
         return None
 
     def on_utterance(self, utterance: str, window_ok: Optional[bool] = None, text_input_focused: bool = False) -> dict:
-        if self._is_calibrating:
-            return {"status": "ignored", "message": "Ignored audio noise during calibration."}
-
         cursor_res = self._handle_cursor_utterance(utterance)
         if cursor_res is not None:
             self.overlay._apply_theme_and_modes()
@@ -432,7 +385,6 @@ class PlushieController:
     def shutdown(self) -> None:
         self._stop_continuous()
         self.grid_overlay.close()
-        self.nose_worker.stop()
         if self.voice_worker is not None:
             self.voice_worker.stop()
         self.overlay.close()
