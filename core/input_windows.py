@@ -10,7 +10,9 @@ if IS_WINDOWS:
 
     user32 = ctypes.WinDLL("user32", use_last_error=True)
 
+    INPUT_MOUSE = 0
     INPUT_KEYBOARD = 1
+    INPUT_HARDWARE = 2
     KEYEVENTF_KEYUP = 0x0002
 
     VK_MAP = {
@@ -44,20 +46,46 @@ if IS_WINDOWS:
     for code in range(ord("a"), ord("z") + 1):
         VK_MAP[chr(code)] = code - 32  # A-Z virtual key codes
 
+    ULONG_PTR = ctypes.c_ulonglong if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_ulong
+
+    class MOUSEINPUT(ctypes.Structure):
+        _fields_ = [
+            ("dx", wintypes.LONG),
+            ("dy", wintypes.LONG),
+            ("mouseData", wintypes.DWORD),
+            ("dwFlags", wintypes.DWORD),
+            ("time", wintypes.DWORD),
+            ("dwExtraInfo", ULONG_PTR),
+        ]
+
     class KEYBDINPUT(ctypes.Structure):
         _fields_ = [
             ("wVk", wintypes.WORD),
             ("wScan", wintypes.WORD),
             ("dwFlags", wintypes.DWORD),
             ("time", wintypes.DWORD),
-            ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+            ("dwExtraInfo", ULONG_PTR),
+        ]
+
+    class HARDWAREINPUT(ctypes.Structure):
+        _fields_ = [
+            ("uMsg", wintypes.DWORD),
+            ("wParamL", wintypes.WORD),
+            ("wParamH", wintypes.WORD),
         ]
 
     class _INPUTunion(ctypes.Union):
-        _fields_ = [("ki", KEYBDINPUT)]
+        _fields_ = [
+            ("mi", MOUSEINPUT),
+            ("ki", KEYBDINPUT),
+            ("hi", HARDWAREINPUT),
+        ]
 
     class INPUT(ctypes.Structure):
-        _fields_ = [("type", wintypes.DWORD), ("union", _INPUTunion)]
+        _fields_ = [
+            ("type", wintypes.DWORD),
+            ("union", _INPUTunion),
+        ]
 
 
 def get_active_window_title() -> str:
@@ -103,18 +131,18 @@ def send_key_combo(keys: List[str]) -> Tuple[bool, str]:
             return False, f"Unsupported key '{k}' in shortcut mapping."
         vk_codes.append(vk)
 
-    extra = ctypes.c_ulong(0)
     inputs = []
     for vk in vk_codes:
-        ki = KEYBDINPUT(wVk=vk, wScan=0, dwFlags=0, time=0, dwExtraInfo=ctypes.pointer(extra))
+        ki = KEYBDINPUT(wVk=vk, wScan=0, dwFlags=0, time=0, dwExtraInfo=0)
         inputs.append(INPUT(type=INPUT_KEYBOARD, union=_INPUTunion(ki=ki)))
     for vk in reversed(vk_codes):
-        ki = KEYBDINPUT(wVk=vk, wScan=0, dwFlags=KEYEVENTF_KEYUP, time=0, dwExtraInfo=ctypes.pointer(extra))
+        ki = KEYBDINPUT(wVk=vk, wScan=0, dwFlags=KEYEVENTF_KEYUP, time=0, dwExtraInfo=0)
         inputs.append(INPUT(type=INPUT_KEYBOARD, union=_INPUTunion(ki=ki)))
 
     arr = (INPUT * len(inputs))(*inputs)
     sent = user32.SendInput(len(inputs), arr, ctypes.sizeof(INPUT))
     time.sleep(0.02)
     if sent != len(inputs):
-        return False, "Windows SendInput failed (target app may be running as Administrator)."
+        err = ctypes.get_last_error()
+        return False, f"Windows SendInput failed (sent={sent}/{len(inputs)}, winerr={err})."
     return True, f"Sent {'+'.join(normalized)}"
