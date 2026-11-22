@@ -1,0 +1,24 @@
+{
+  "normal": {
+    "listening": "Listening ({mode} / {app}).",
+    "executed": "Ran '{action}' ({keys}).",
+    "cant_do_unmapped": "Can't run '{action}' — not mapped in {app}.",
+    "cant_do_focus": "Can't send '{keys}' — {app} window isn't focused or a text box is active.",
+    "cant_do_unsupported": "Can't do '{action}' — unsupported by current automation.",
+    "squeeze": "Overlay clicked.",
+    "horror_enter": "Mode updated.",
+    "horror_exit": "Mode reset.",
+    "comfort_break": "Take a short break if needed."
+  },
+  "horror": {
+    "listening": "Listening ({mode} / {app}).",
+    "executed": "Ran '{action}' ({keys}).",
+    "cant_do_unmapped": "Can't run '{action}' — not mapped in {app}.",
+    "cant_do_focus": "Can't send '{keys}' — {app} window isn't focused or a text box is active.",
+    "cant_do_unsupported": "Can't do '{action}' — unsupported by current automation.",
+    "squeeze": "Overlay clicked.",
+    "horror_enter": "Mode updated.",
+    "horror_exit": "Mode reset.",
+    "comfort_break": "Take a short break if needed."
+  }
+}

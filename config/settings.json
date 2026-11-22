@@ -1,0 +1,9 @@
+{
+  "active_theme": "re_leon",
+  "compute_mode": "gpu",
+  "voice_mode": "always_on",
+  "wake_phrase": "leon",
+  "comfort_mode": false,
+  "night_mode": false,
+  "active_app": "auto"
+}
