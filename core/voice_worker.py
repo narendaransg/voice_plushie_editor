@@ -64,7 +64,7 @@ class VoiceListenerWorker(QObject):
             from faster_whisper import WhisperModel
         except Exception as exc:
             self._whisper_unavailable = True
-            self.status_changed.emit(f"Whisper unavailable ({exc}); using Vosk / offline fallback.")
+            self.status_changed.emit(f"Whisper unavailable ({exc}); using Vosk fallback.")
             return None
 
         device = "cuda" if sig[0] == "gpu" else "cpu"
@@ -81,20 +81,25 @@ class VoiceListenerWorker(QObject):
 
         if not self.vosk_model_dir or not self.vosk_model_dir.exists():
             return None
-        self.status_changed.emit("Loading Vosk offline CPU model...")
+        self.status_changed.emit("Loading Vosk offline model...")
         self._vosk_model = Model(str(self.vosk_model_dir))
         return self._vosk_model
 
-    def _transcribe_pcm(self, pcm_bytes: bytes, mode: str) -> str:
-        if mode == "cpu" and self.vosk_model_dir and self.vosk_model_dir.exists():
-            from vosk import KaldiRecognizer
+    def _transcribe_with_vosk(self, pcm_bytes: bytes) -> str:
+        from vosk import KaldiRecognizer
 
-            model = self._ensure_vosk()
-            if model is not None:
-                rec = KaldiRecognizer(model, self.sample_rate)
-                rec.AcceptWaveform(pcm_bytes)
-                res = json.loads(rec.FinalResult())
-                return res.get("text", "").strip()
+        model = self._ensure_vosk()
+        if model is None:
+            return ""
+        rec = KaldiRecognizer(model, self.sample_rate)
+        rec.AcceptWaveform(pcm_bytes)
+        res = json.loads(rec.FinalResult())
+        return res.get("text", "").strip()
+
+    def _transcribe_pcm(self, pcm_bytes: bytes, mode: str) -> str:
+        has_vosk_dir = bool(self.vosk_model_dir and self.vosk_model_dir.exists())
+        if mode == "cpu" and has_vosk_dir:
+            return self._transcribe_with_vosk(pcm_bytes)
 
         import numpy as np
 
@@ -107,7 +112,7 @@ class VoiceListenerWorker(QObject):
 
         model = self._ensure_whisper(mode)
         if model is None:
-            return ""
+            return self._transcribe_with_vosk(pcm_bytes) if has_vosk_dir else ""
 
         audio_float32 = audio_int16.astype(np.float32) / 32768.0
         segments, _ = model.transcribe(audio_float32, beam_size=1, vad_filter=True)
