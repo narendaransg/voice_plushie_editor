@@ -1,8 +1,6 @@
-import io
 import json
 import re
 import threading
-import wave
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -34,6 +32,7 @@ class VoiceListenerWorker(QObject):
         self._thread: Optional[threading.Thread] = None
         self._whisper_model = None
         self._whisper_sig = None
+        self._whisper_unavailable = False
         self._vosk_model = None
 
     def set_muted(self, muted: bool) -> None:
@@ -55,11 +54,18 @@ class VoiceListenerWorker(QObject):
             self._thread.join(timeout=2.0)
 
     def _ensure_whisper(self, mode: str):
+        if self._whisper_unavailable:
+            return None
         sig = ("gpu", "small", "float16") if mode == "gpu" else ("cpu", "tiny", "int8")
         if self._whisper_model is not None and self._whisper_sig == sig:
             return self._whisper_model
 
-        from faster_whisper import WhisperModel
+        try:
+            from faster_whisper import WhisperModel
+        except Exception as exc:
+            self._whisper_unavailable = True
+            self.status_changed.emit(f"Whisper unavailable ({exc}); using Vosk / offline fallback.")
+            return None
 
         device = "cuda" if sig[0] == "gpu" else "cpu"
         compute_type = sig[2]
@@ -99,8 +105,11 @@ class VoiceListenerWorker(QObject):
         if rms < 250.0:
             return ""
 
-        audio_float32 = audio_int16.astype(np.float32) / 32768.0
         model = self._ensure_whisper(mode)
+        if model is None:
+            return ""
+
+        audio_float32 = audio_int16.astype(np.float32) / 32768.0
         segments, _ = model.transcribe(audio_float32, beam_size=1, vad_filter=True)
         return " ".join(seg.text.strip() for seg in segments if seg.text.strip()).strip()
 
