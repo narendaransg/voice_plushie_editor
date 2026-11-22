@@ -1,3 +1,4 @@
+import math
 import sys
 import threading
 import time
@@ -7,7 +8,7 @@ from PySide6.QtCore import QObject, Signal
 
 
 class NoseTrackerWorker(QObject):
-    """Tracks nose-tip displacement on a webcam with graceful no-webcam fallback."""
+    """Tracks face movement on a webcam for responsive cursor control with no-webcam fallback."""
 
     delta_ready = Signal(int, int)
     status_changed = Signal(str)
@@ -15,10 +16,10 @@ class NoseTrackerWorker(QObject):
 
     def __init__(
         self,
-        gain_x: float = 28.0,
-        gain_y: float = 24.0,
-        deadzone: float = 0.035,
-        smoothing: float = 0.35,
+        gain_x: float = 95.0,
+        gain_y: float = 85.0,
+        deadzone: float = 0.018,
+        smoothing: float = 0.65,
     ):
         super().__init__(None)
         self.gain_x = gain_x
@@ -32,13 +33,17 @@ class NoseTrackerWorker(QObject):
         self._anchor: Optional[Tuple[float, float]] = None
         self._smooth_dx = 0.0
         self._smooth_dy = 0.0
+        self._rem_x = 0.0
+        self._rem_y = 0.0
 
     def recenter(self) -> None:
         self._anchor = None
         self._smooth_dx = 0.0
         self._smooth_dy = 0.0
+        self._rem_x = 0.0
+        self._rem_y = 0.0
         self._recenter_event.set()
-        self.status_changed.emit("Nose anchor reset — look straight ahead.")
+        self.status_changed.emit("Face center reset — look straight ahead.")
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -47,7 +52,9 @@ class NoseTrackerWorker(QObject):
         self._anchor = None
         self._smooth_dx = 0.0
         self._smooth_dy = 0.0
-        self._thread = threading.Thread(target=self._run_loop, name="NoseTrackerThread", daemon=True)
+        self._rem_x = 0.0
+        self._rem_y = 0.0
+        self._thread = threading.Thread(target=self._run_loop, name="FaceTrackerThread", daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
@@ -60,6 +67,9 @@ class NoseTrackerWorker(QObject):
         for idx in range(3):
             cap = cv2.VideoCapture(idx, backend)
             if cap is not None and cap.isOpened():
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                cap.set(cv2.CAP_PROP_FPS, 60)
                 ok, frame = cap.read()
                 if ok and frame is not None and frame.size > 0:
                     return cap, frame
@@ -67,22 +77,26 @@ class NoseTrackerWorker(QObject):
                 cap.release()
         return None, None
 
-    def _detect_nose_normalized(self, frame, cv2, face_cascade) -> Optional[Tuple[float, float]]:
-        h, w = frame.shape[:2]
-        if w == 0 or h == 0:
-            return None
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.15, minNeighbors=5, minSize=(80, 80))
+    def _detect_face_normalized(self, frame, cv2, face_cascade) -> Optional[Tuple[float, float]]:
+        small = cv2.resize(frame, (320, 240))
+        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.15, minNeighbors=4, minSize=(45, 45))
         if len(faces) == 0:
             return None
-        # Pick largest face
         fx, fy, fw, fh = max(faces, key=lambda r: r[2] * r[3])
-        # Approximate nose tip near center-lower-mid of detected face box
-        nose_x = (fx + fw * 0.5) / float(w)
-        nose_y = (fy + fh * 0.55) / float(h)
-        # Mirror horizontal movement so moving head right moves cursor right
-        mirrored_x = 1.0 - nose_x
-        return mirrored_x, nose_y
+        face_cx = (fx + fw * 0.5) / 320.0
+        face_cy = (fy + fh * 0.5) / 240.0
+        mirrored_x = 1.0 - face_cx
+        return mirrored_x, face_cy
+
+    def _apply_accel(self, offset: float, gain: float) -> float:
+        mag = abs(offset)
+        if mag < self.deadzone:
+            return 0.0
+        effective = mag - self.deadzone
+        # Non-linear boost: gentle for tiny tilts, fast sweep for larger head turns
+        speed = (effective * gain) + ((effective * 14.0) ** 2)
+        return math.copysign(speed, offset)
 
     def _run_loop(self) -> None:
         try:
@@ -91,7 +105,6 @@ class NoseTrackerWorker(QObject):
             self.error_occurred.emit(f"Webcam tracking unavailable ('cv2' missing): {exc}")
             return
 
-        cascade_path = Path_cascade = None
         try:
             cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
         except Exception:
@@ -107,45 +120,49 @@ class NoseTrackerWorker(QObject):
             self.status_changed.emit("No webcam detected — voice cursor ('move left/right/up/down', 'click') active.")
             return
 
-        self.status_changed.emit("Nose tracking active (say 'recenter' anytime).")
+        self.status_changed.emit("Face tracking active (say 'recenter' anytime).")
         try:
             while not self._stop_event.is_set():
                 ok, frame = cap.read()
                 if not ok or frame is None:
-                    time.sleep(0.05)
+                    time.sleep(0.015)
                     continue
 
                 if self._recenter_event.is_set():
                     self._recenter_event.clear()
                     self._anchor = None
 
-                pos = self._detect_nose_normalized(frame, cv2, face_cascade)
+                pos = self._detect_face_normalized(frame, cv2, face_cascade)
                 if pos is None:
-                    time.sleep(0.02)
+                    time.sleep(0.01)
                     continue
 
                 if self._anchor is None:
                     self._anchor = pos
                     continue
 
-                raw_dx = (pos[0] - self._anchor[0]) * self.gain_x
-                raw_dy = (pos[1] - self._anchor[1]) * self.gain_y
+                off_x = pos[0] - self._anchor[0]
+                off_y = pos[1] - self._anchor[1]
 
-                if abs(pos[0] - self._anchor[0]) < self.deadzone:
-                    raw_dx = 0.0
-                if abs(pos[1] - self._anchor[1]) < self.deadzone:
-                    raw_dy = 0.0
+                raw_dx = self._apply_accel(off_x, self.gain_x)
+                raw_dy = self._apply_accel(off_y, self.gain_y)
 
                 self._smooth_dx += (raw_dx - self._smooth_dx) * self.smoothing
                 self._smooth_dy += (raw_dy - self._smooth_dy) * self.smoothing
 
-                dx_int = int(round(self._smooth_dx))
-                dy_int = int(round(self._smooth_dy))
+                total_x = self._smooth_dx + self._rem_x
+                total_y = self._smooth_dy + self._rem_y
+
+                dx_int = int(round(total_x))
+                dy_int = int(round(total_y))
+                self._rem_x = total_x - dx_int
+                self._rem_y = total_y - dy_int
+
                 if dx_int != 0 or dy_int != 0:
                     self.delta_ready.emit(dx_int, dy_int)
 
-                time.sleep(0.025)
+                time.sleep(0.01)
         except Exception as exc:
-            self.error_occurred.emit(f"Nose tracker stopped ({exc}); voice cursor still works.")
+            self.error_occurred.emit(f"Face tracker stopped ({exc}); voice cursor still works.")
         finally:
             cap.release()
