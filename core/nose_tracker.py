@@ -205,15 +205,19 @@ class NoseTrackerWorker(QObject):
     def _run_calibration(self, cap, cv2, cascades) -> bool:
         self.calibration_state_changed.emit(True)
         try:
-            total_seconds = 30.0
-            slot_seconds = total_seconds / 5.0  # 6.0s each for center, right, left, up, down
+            total_seconds = 60.0
             stages = [
-                ("center", "1/5 CENTER"),
-                ("right", "2/5 RIGHT"),
-                ("left", "3/5 LEFT"),
-                ("up", "4/5 UP"),
-                ("down", "5/5 DOWN"),
+                ("center", "1/9 CENTER", "Hold face steady at CENTER"),
+                ("right", "2/9 RIGHT", "Slowly turn/tilt RIGHT"),
+                ("left", "3/9 LEFT", "Slowly turn/tilt LEFT"),
+                ("up", "4/9 UP", "Slowly tilt UP"),
+                ("down", "5/9 DOWN", "Slowly tilt DOWN"),
+                ("nw", "6/9 NW", "Slowly turn/tilt UP-LEFT (NW)"),
+                ("ne", "7/9 NE", "Slowly turn/tilt UP-RIGHT (NE)"),
+                ("sw", "8/9 SW", "Slowly turn/tilt DOWN-LEFT (SW)"),
+                ("se", "9/9 SE", "Slowly turn/tilt DOWN-RIGHT (SE)"),
             ]
+            slot_seconds = total_seconds / float(len(stages))
 
             start_t = time.monotonic()
             center_samples: List[Tuple[float, float]] = []
@@ -229,21 +233,10 @@ class NoseTrackerWorker(QObject):
                     break
 
                 idx = min(len(stages) - 1, int(elapsed // slot_seconds))
-                stage_key, stage_title = stages[idx]
+                stage_key, stage_title, instruction = stages[idx]
                 stage_elapsed = elapsed - (idx * slot_seconds)
                 stage_rem = max(0.0, slot_seconds - stage_elapsed)
                 total_rem = max(0.0, total_seconds - elapsed)
-
-                if stage_key == "center":
-                    instruction = "Hold face CENTER"
-                elif stage_key == "right":
-                    instruction = "Slowly turn/tilt RIGHT"
-                elif stage_key == "left":
-                    instruction = "Slowly turn/tilt LEFT"
-                elif stage_key == "up":
-                    instruction = "Slowly tilt UP"
-                else:
-                    instruction = "Slowly tilt DOWN (settles to center)"
 
                 status_line = (
                     f"[{stage_title} | Stage {stage_rem:.1f}s | Total {total_rem:.1f}s]: "
@@ -285,7 +278,7 @@ class NoseTrackerWorker(QObject):
             self._rem_y = 0.0
             self._prev_off_x = 0.0
             self._prev_off_y = 0.0
-            self.status_changed.emit("30s calibration complete! Linear cursor + voice active.")
+            self.status_changed.emit("1-min calibration complete! Linear cursor + voice active.")
             return True
         finally:
             self.calibration_state_changed.emit(False)
