@@ -9,8 +9,6 @@ from PySide6.QtWidgets import QApplication, QPushButton, QMessageBox, QHBoxLayou
 from core.input_windows import (
     check_target_window,
     send_key_combo,
-    get_screen_size,
-    move_mouse_to_screen,
     move_mouse_relative,
     mouse_click,
     mouse_double_click,
@@ -33,9 +31,8 @@ class PlushieController:
         self.enable_voice = enable_voice
 
         self.overlay = PlushieOverlayWindow(self.root_dir)
-        sw, sh = get_screen_size()
-        self.nose_worker = NoseTrackerWorker(screen_width=sw, screen_height=sh, calibration_seconds=30.0)
-        self.nose_worker.screen_pos_ready.connect(self._on_face_screen_pos)
+        self.nose_worker = NoseTrackerWorker()
+        self.nose_worker.delta_ready.connect(self._on_nose_delta)
         self.nose_worker.status_changed.connect(self._on_voice_status)
         self.nose_worker.error_occurred.connect(self._on_voice_error)
 
@@ -94,8 +91,8 @@ class PlushieController:
             self.nose_worker.stop()
             self.overlay.status_label.setText("Face tracking paused.")
 
-    def _on_face_screen_pos(self, x: int, y: int) -> None:
-        move_mouse_to_screen(x, y)
+    def _on_nose_delta(self, dx: int, dy: int) -> None:
+        move_mouse_relative(dx, dy)
 
     def _refresh_theme_combo(self) -> None:
         self.theme_combo.blockSignals(True)
@@ -150,13 +147,13 @@ class PlushieController:
 
         if text in ("nose on", "start nose", "enable nose"):
             self.toggle_nose_tracking(True)
-            return {"status": "cursor", "message": "Face tracking enabled (30s calibration)."}
+            return {"status": "cursor", "message": "Face tracking enabled (checking visibility)."}
         if text in ("nose off", "stop nose", "disable nose", "freeze cursor"):
             self.toggle_nose_tracking(False)
             return {"status": "cursor", "message": "Face tracking disabled."}
         if "recenter" in text or "reset nose" in text or "calibrate" in text:
             self.nose_worker.recenter()
-            return {"status": "cursor", "message": "Starting 30s calibration..."}
+            return {"status": "cursor", "message": "Re-checking face visibility..."}
 
         if "double click" in text:
             ok, detail = mouse_double_click()
