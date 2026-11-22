@@ -17,7 +17,7 @@ class NoseTrackerWorker(QObject):
         self,
         screen_width: int = 1920,
         screen_height: int = 1080,
-        calibration_seconds: float = 5.0,
+        calibration_seconds: float = 30.0,
         smoothing: float = 0.35,
         right_boost: float = 1.25,
     ):
@@ -44,7 +44,7 @@ class NoseTrackerWorker(QObject):
 
     def recenter(self) -> None:
         self._recenter_event.set()
-        self.status_changed.emit("Starting 5s calibration — look center first...")
+        self.status_changed.emit("Starting 30s calibration — look center first...")
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -104,21 +104,21 @@ class NoseTrackerWorker(QObject):
             if elapsed >= self.calibration_seconds:
                 break
 
-            if elapsed < 1.5:
+            if elapsed < 7.0:
                 stage = "center"
                 prompt = f"Calibrating ({remaining:.1f}s): Hold face CENTER (screen middle)"
-            elif elapsed < 2.6:
+            elif elapsed < 14.0:
                 stage = "right"
-                prompt = f"Calibrating ({remaining:.1f}s): Move face RIGHT on neck"
-            elif elapsed < 3.7:
+                prompt = f"Calibrating ({remaining:.1f}s): Slowly move face RIGHT on neck"
+            elif elapsed < 21.0:
                 stage = "left"
-                prompt = f"Calibrating ({remaining:.1f}s): Move face LEFT on neck"
-            elif elapsed < 4.4:
+                prompt = f"Calibrating ({remaining:.1f}s): Slowly move face LEFT on neck"
+            elif elapsed < 26.0:
                 stage = "up"
-                prompt = f"Calibrating ({remaining:.1f}s): Tilt face UP"
+                prompt = f"Calibrating ({remaining:.1f}s): Slowly tilt face UP"
             else:
                 stage = "down"
-                prompt = f"Calibrating ({remaining:.1f}s): Tilt face DOWN"
+                prompt = f"Calibrating ({remaining:.1f}s): Slowly tilt face DOWN"
 
             if prompt != last_prompt:
                 self.status_changed.emit(prompt)

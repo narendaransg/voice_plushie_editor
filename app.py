@@ -34,7 +34,7 @@ class PlushieController:
 
         self.overlay = PlushieOverlayWindow(self.root_dir)
         sw, sh = get_screen_size()
-        self.nose_worker = NoseTrackerWorker(screen_width=sw, screen_height=sh, calibration_seconds=5.0)
+        self.nose_worker = NoseTrackerWorker(screen_width=sw, screen_height=sh, calibration_seconds=30.0)
         self.nose_worker.screen_pos_ready.connect(self._on_face_screen_pos)
         self.nose_worker.status_changed.connect(self._on_voice_status)
         self.nose_worker.error_occurred.connect(self._on_voice_error)
@@ -150,13 +150,13 @@ class PlushieController:
 
         if text in ("nose on", "start nose", "enable nose"):
             self.toggle_nose_tracking(True)
-            return {"status": "cursor", "message": "Face tracking enabled (5s calibration)."}
+            return {"status": "cursor", "message": "Face tracking enabled (30s calibration)."}
         if text in ("nose off", "stop nose", "disable nose", "freeze cursor"):
             self.toggle_nose_tracking(False)
             return {"status": "cursor", "message": "Face tracking disabled."}
         if "recenter" in text or "reset nose" in text or "calibrate" in text:
             self.nose_worker.recenter()
-            return {"status": "cursor", "message": "Starting 5s calibration..."}
+            return {"status": "cursor", "message": "Starting 30s calibration..."}
 
         if "double click" in text:
             ok, detail = mouse_double_click()
