@@ -8,11 +8,12 @@ from PySide6.QtCore import QObject, Signal
 
 
 class NoseTrackerWorker(QObject):
-    """Checks multi-angle face visibility before calibrating, then moves cursor linearly via relative deltas."""
+    """Slow, patient multi-angle face check + neutral calibration with linear relative cursor control."""
 
     delta_ready = Signal(int, int)
     status_changed = Signal(str)
     error_occurred = Signal(str)
+    calibration_state_changed = Signal(bool)
 
     def __init__(
         self,
@@ -45,7 +46,7 @@ class NoseTrackerWorker(QObject):
         self._rem_x = 0.0
         self._rem_y = 0.0
         self._recenter_event.set()
-        self.status_changed.emit("Re-checking face visibility before calibration...")
+        self.status_changed.emit("Restarting slow calibration (ignoring mic noise)...")
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -62,6 +63,7 @@ class NoseTrackerWorker(QObject):
 
     def stop(self) -> None:
         self._stop_event.set()
+        self.calibration_state_changed.emit(False)
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2.0)
 
@@ -99,7 +101,6 @@ class NoseTrackerWorker(QObject):
 
         best_box = None
         best_area = 0
-        best_flipped = False
 
         for fname, cascade in cascades:
             faces = cascade.detectMultiScale(gray, scaleFactor=1.12, minNeighbors=3, minSize=(40, 40))
@@ -108,7 +109,6 @@ class NoseTrackerWorker(QObject):
                 if area > best_area:
                     best_area = area
                     best_box = (fx, fy, fw, fh)
-                    best_flipped = False
 
             if "profile" in fname:
                 pfaces = cascade.detectMultiScale(flipped_gray, scaleFactor=1.12, minNeighbors=3, minSize=(40, 40))
@@ -117,7 +117,6 @@ class NoseTrackerWorker(QObject):
                     if area > best_area:
                         best_area = area
                         best_box = (320 - (fx + fw), fy, fw, fh)
-                        best_flipped = True
 
         if best_box is None:
             return None
@@ -126,115 +125,154 @@ class NoseTrackerWorker(QObject):
         face_cx = (fx + fw * 0.5) / 320.0
         face_cy = (fy + fh * 0.5) / 240.0
         mirrored_x = 1.0 - face_cx
-        _ = best_flipped
         return mirrored_x, face_cy
 
-    def _verify_all_directions(self, cap, cv2, cascades) -> Optional[Tuple[float, float]]:
-        """Confirm face is clearly detected across center, right, left, up, and down turns."""
-        checks = [
-            ("center", "Visibility check: Hold face CENTER so camera sees you clearly..."),
-            ("right", "Visibility check: Turn/tilt face RIGHT to confirm tracking..."),
-            ("left", "Visibility check: Turn/tilt face LEFT to confirm tracking..."),
-            ("up", "Visibility check: Tilt face UP to confirm tracking..."),
-            ("down", "Visibility check: Tilt face DOWN to confirm tracking..."),
-        ]
-        seen: Dict[str, List[Tuple[float, float]]] = {k: [] for k, _ in checks}
-        baseline: Optional[Tuple[float, float]] = None
+    def _wait_for_direction_hold(
+        self,
+        cap,
+        cv2,
+        cascades,
+        step_key: str,
+        label: str,
+        baseline: Optional[Tuple[float, float]],
+        required_hits: int = 20,
+    ) -> Optional[List[Tuple[float, float]]]:
+        """Patiently wait without timing out until user holds the requested head angle steadily."""
+        samples: List[Tuple[float, float]] = []
+        last_status = ""
 
-        for step_key, prompt in checks:
-            self.status_changed.emit(prompt)
-            confirmed_hits = 0
-            start_step = time.monotonic()
+        while not self._stop_event.is_set():
+            if self._recenter_event.is_set():
+                return None
+
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                time.sleep(0.03)
+                continue
+
+            pos = self._detect_face_normalized(frame, cv2, cascades)
+            if pos is None:
+                msg = f"{label} — waiting to see face clearly (ignoring audio noise)..."
+                if msg != last_status:
+                    self.status_changed.emit(msg)
+                    last_status = msg
+                time.sleep(0.04)
+                continue
+
+            if step_key == "center":
+                # Check steadiness relative to recent samples so user settles calmly
+                if samples:
+                    avg_x = sum(p[0] for p in samples) / len(samples)
+                    avg_y = sum(p[1] for p in samples) / len(samples)
+                    if abs(pos[0] - avg_x) > 0.035 or abs(pos[1] - avg_y) > 0.035:
+                        samples.clear()
+                samples.append(pos)
+            else:
+                bx, by = baseline if baseline is not None else pos
+                dx = pos[0] - bx
+                dy = pos[1] - by
+                in_direction = (
+                    (step_key == "right" and dx > 0.028)
+                    or (step_key == "left" and dx < -0.028)
+                    or (step_key == "up" and dy < -0.022)
+                    or (step_key == "down" and dy > 0.022)
+                )
+                if in_direction:
+                    samples.append(pos)
+                else:
+                    # Gently decay rather than harshly resetting, and keep waiting patiently
+                    if samples:
+                        samples.pop()
+
+            pct = min(100, int((len(samples) / required_hits) * 100))
+            msg = f"{label}: {pct}% (take your time — ignoring audio noise)"
+            if msg != last_status:
+                self.status_changed.emit(msg)
+                last_status = msg
+
+            if len(samples) >= required_hits:
+                self.status_changed.emit(f"{label}: Done! Relax back to center...")
+                time.sleep(0.7)
+                return samples
+
+            time.sleep(0.045)
+
+        return None
+
+    def _run_calibration(self, cap, cv2, cascades) -> bool:
+        self.calibration_state_changed.emit(True)
+        try:
+            self.status_changed.emit("Slow calibration starting — take your time, mic noise is ignored.")
+            time.sleep(0.8)
+
+            center_samples = self._wait_for_direction_hold(
+                cap, cv2, cascades, "center", "Step 1/5: Hold face steady at CENTER", None, required_hits=24
+            )
+            if center_samples is None:
+                return False
+
+            baseline = (
+                sum(p[0] for p in center_samples) / len(center_samples),
+                sum(p[1] for p in center_samples) / len(center_samples),
+            )
+
+            directional_steps = [
+                ("right", "Step 2/5: Slowly turn/tilt RIGHT & hold"),
+                ("left", "Step 3/5: Slowly turn/tilt LEFT & hold"),
+                ("up", "Step 4/5: Slowly tilt UP & hold"),
+                ("down", "Step 5/5: Slowly tilt DOWN & hold"),
+            ]
+
+            for step_key, label in directional_steps:
+                res = self._wait_for_direction_hold(
+                    cap, cv2, cascades, step_key, label, baseline, required_hits=18
+                )
+                if res is None:
+                    return False
+
+            # Final calm 5-second neutral center lock
+            final_samples: List[Tuple[float, float]] = []
+            start_lock = time.monotonic()
+            lock_duration = 5.0
+            last_sec = -1
 
             while not self._stop_event.is_set():
                 if self._recenter_event.is_set():
-                    self._recenter_event.clear()
-                    return self._verify_all_directions(cap, cv2, cascades)
+                    return False
+                elapsed = time.monotonic() - start_lock
+                rem = max(0.0, lock_duration - elapsed)
+                if elapsed >= lock_duration and len(final_samples) >= 15:
+                    break
 
                 ok, frame = cap.read()
-                if not ok or frame is None:
-                    time.sleep(0.015)
-                    continue
+                if ok and frame is not None:
+                    pos = self._detect_face_normalized(frame, cv2, cascades)
+                    if pos is not None:
+                        final_samples.append(pos)
 
-                pos = self._detect_face_normalized(frame, cv2, cascades)
-                if pos is None:
-                    if time.monotonic() - start_step > 4.0:
-                        self.status_changed.emit(f"{prompt} (face not clearly visible — adjust angle/light)")
-                        start_step = time.monotonic()
-                    time.sleep(0.015)
-                    continue
-
-                if baseline is None and step_key == "center":
-                    seen["center"].append(pos)
-                    confirmed_hits += 1
-                    if confirmed_hits >= 5:
-                        baseline = (
-                            sum(p[0] for p in seen["center"]) / len(seen["center"]),
-                            sum(p[1] for p in seen["center"]) / len(seen["center"]),
-                        )
-                        break
-                else:
-                    bx, by = baseline if baseline is not None else pos
-                    dx = pos[0] - bx
-                    dy = pos[1] - by
-                    moved_ok = (
-                        (step_key == "right" and dx > 0.025)
-                        or (step_key == "left" and dx < -0.025)
-                        or (step_key == "up" and dy < -0.02)
-                        or (step_key == "down" and dy > 0.02)
+                sec_ceil = int(math.ceil(rem))
+                if sec_ceil != last_sec:
+                    self.status_changed.emit(
+                        f"Final lock ({sec_ceil}s): Look straight & relax at CENTER (ignoring mic noise)..."
                     )
-                    if moved_ok:
-                        seen[step_key].append(pos)
-                        confirmed_hits += 1
-                        if confirmed_hits >= 3:
-                            break
-                    elif time.monotonic() - start_step > 6.0:
-                        # Accept visible detection after timeout so user isn't stuck if movement is subtle
-                        seen[step_key].append(pos)
-                        break
-
-                time.sleep(0.02)
+                    last_sec = sec_ceil
+                time.sleep(0.04)
 
             if self._stop_event.is_set():
-                return None
+                return False
 
-        if seen["center"]:
-            return (
-                sum(p[0] for p in seen["center"]) / len(seen["center"]),
-                sum(p[1] for p in seen["center"]) / len(seen["center"]),
+            self._anchor = (
+                sum(p[0] for p in final_samples) / len(final_samples),
+                sum(p[1] for p in final_samples) / len(final_samples),
             )
-        return baseline or (0.5, 0.5)
-
-    def _run_calibration(self, cap, cv2, cascades) -> bool:
-        anchor = self._verify_all_directions(cap, cv2, cascades)
-        if anchor is None or self._stop_event.is_set():
-            return False
-
-        self.status_changed.emit("Visibility confirmed! Calibrating neutral center (3s)...")
-        samples: List[Tuple[float, float]] = [anchor]
-        end_t = time.monotonic() + 3.0
-
-        while not self._stop_event.is_set() and time.monotonic() < end_t:
-            ok, frame = cap.read()
-            if ok and frame is not None:
-                pos = self._detect_face_normalized(frame, cv2, cascades)
-                if pos is not None:
-                    samples.append(pos)
-            time.sleep(0.02)
-
-        if self._stop_event.is_set():
-            return False
-
-        self._anchor = (
-            sum(p[0] for p in samples) / len(samples),
-            sum(p[1] for p in samples) / len(samples),
-        )
-        self._smooth_dx = 0.0
-        self._smooth_dy = 0.0
-        self._rem_x = 0.0
-        self._rem_y = 0.0
-        self.status_changed.emit("Linear face tracking active (say 'recenter' anytime).")
-        return True
+            self._smooth_dx = 0.0
+            self._smooth_dy = 0.0
+            self._rem_x = 0.0
+            self._rem_y = 0.0
+            self.status_changed.emit("Calibration complete! Linear cursor + voice active.")
+            return True
+        finally:
+            self.calibration_state_changed.emit(False)
 
     def _linear_step(self, offset: float, gain: float) -> float:
         mag = abs(offset)
@@ -261,14 +299,20 @@ class NoseTrackerWorker(QObject):
             return
 
         try:
-            if not self._run_calibration(cap, cv2, cascades):
-                return
+            while not self._stop_event.is_set():
+                self._recenter_event.clear()
+                if self._run_calibration(cap, cv2, cascades):
+                    break
+                if self._stop_event.is_set():
+                    return
 
             while not self._stop_event.is_set():
                 if self._recenter_event.is_set():
                     self._recenter_event.clear()
-                    if not self._run_calibration(cap, cv2, cascades):
-                        return
+                    while not self._stop_event.is_set():
+                        self._recenter_event.clear()
+                        if self._run_calibration(cap, cv2, cascades):
+                            break
 
                 ok, frame = cap.read()
                 if not ok or frame is None:
@@ -305,4 +349,5 @@ class NoseTrackerWorker(QObject):
         except Exception as exc:
             self.error_occurred.emit(f"Face tracker stopped ({exc}); voice cursor still works.")
         finally:
+            self.calibration_state_changed.emit(False)
             cap.release()

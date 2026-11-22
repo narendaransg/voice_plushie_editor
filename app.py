@@ -31,7 +31,9 @@ class PlushieController:
         self.enable_voice = enable_voice
 
         self.overlay = PlushieOverlayWindow(self.root_dir)
+        self._is_calibrating = False
         self.nose_worker = NoseTrackerWorker()
+        self.nose_worker.calibration_state_changed.connect(self._on_calibration_state_changed)
         self.nose_worker.delta_ready.connect(self._on_nose_delta)
         self.nose_worker.status_changed.connect(self._on_voice_status)
         self.nose_worker.error_occurred.connect(self._on_voice_error)
@@ -90,6 +92,9 @@ class PlushieController:
             self.nose_btn.setText("Nose: Off")
             self.nose_worker.stop()
             self.overlay.status_label.setText("Face tracking paused.")
+
+    def _on_calibration_state_changed(self, calibrating: bool) -> None:
+        self._is_calibrating = bool(calibrating)
 
     def _on_nose_delta(self, dx: int, dy: int) -> None:
         move_mouse_relative(dx, dy)
@@ -194,6 +199,9 @@ class PlushieController:
         return None
 
     def on_utterance(self, utterance: str, window_ok: Optional[bool] = None, text_input_focused: bool = False) -> dict:
+        if self._is_calibrating:
+            return {"status": "ignored", "message": "Ignored audio noise during calibration."}
+
         cursor_res = self._handle_cursor_utterance(utterance)
         if cursor_res is not None:
             self.overlay._apply_theme_and_modes()
