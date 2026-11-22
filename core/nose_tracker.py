@@ -205,75 +205,87 @@ class NoseTrackerWorker(QObject):
     def _run_calibration(self, cap, cv2, cascades) -> bool:
         self.calibration_state_changed.emit(True)
         try:
-            self.status_changed.emit("Slow calibration starting — take your time, mic noise is ignored.")
-            time.sleep(0.8)
-
-            center_samples = self._wait_for_direction_hold(
-                cap, cv2, cascades, "center", "Step 1/5: Hold face steady at CENTER", None, required_hits=24
-            )
-            if center_samples is None:
-                return False
-
-            baseline = (
-                sum(p[0] for p in center_samples) / len(center_samples),
-                sum(p[1] for p in center_samples) / len(center_samples),
-            )
-
-            directional_steps = [
-                ("right", "Step 2/5: Slowly turn/tilt RIGHT & hold"),
-                ("left", "Step 3/5: Slowly turn/tilt LEFT & hold"),
-                ("up", "Step 4/5: Slowly tilt UP & hold"),
-                ("down", "Step 5/5: Slowly tilt DOWN & hold"),
+            total_seconds = 30.0
+            slot_seconds = total_seconds / 5.0  # 6.0s each for center, right, left, up, down
+            stages = [
+                ("center", "1/5 CENTER"),
+                ("right", "2/5 RIGHT"),
+                ("left", "3/5 LEFT"),
+                ("up", "4/5 UP"),
+                ("down", "5/5 DOWN"),
             ]
 
-            for step_key, label in directional_steps:
-                res = self._wait_for_direction_hold(
-                    cap, cv2, cascades, step_key, label, baseline, required_hits=18
-                )
-                if res is None:
-                    return False
-
-            # Final calm 30-second neutral center lock
-            final_samples: List[Tuple[float, float]] = []
-            start_lock = time.monotonic()
-            lock_duration = 30.0
-            last_sec = -1
+            start_t = time.monotonic()
+            center_samples: List[Tuple[float, float]] = []
+            all_samples: List[Tuple[float, float]] = []
+            last_label = ""
 
             while not self._stop_event.is_set():
                 if self._recenter_event.is_set():
                     return False
-                elapsed = time.monotonic() - start_lock
-                rem = max(0.0, lock_duration - elapsed)
-                if elapsed >= lock_duration and len(final_samples) >= 20:
+
+                elapsed = time.monotonic() - start_t
+                if elapsed >= total_seconds:
                     break
+
+                idx = min(len(stages) - 1, int(elapsed // slot_seconds))
+                stage_key, stage_title = stages[idx]
+                stage_elapsed = elapsed - (idx * slot_seconds)
+                stage_rem = max(0.0, slot_seconds - stage_elapsed)
+                total_rem = max(0.0, total_seconds - elapsed)
+
+                if stage_key == "center":
+                    instruction = "Hold face CENTER"
+                elif stage_key == "right":
+                    instruction = "Slowly turn/tilt RIGHT"
+                elif stage_key == "left":
+                    instruction = "Slowly turn/tilt LEFT"
+                elif stage_key == "up":
+                    instruction = "Slowly tilt UP"
+                else:
+                    instruction = "Slowly tilt DOWN (settles to center)"
+
+                status_line = (
+                    f"[{stage_title} | Stage {stage_rem:.1f}s | Total {total_rem:.1f}s]: "
+                    f"{instruction} — ignoring mic noise"
+                )
+                if status_line != last_label:
+                    self.status_changed.emit(status_line)
+                    last_label = status_line
 
                 ok, frame = cap.read()
                 if ok and frame is not None:
                     pos = self._detect_face_normalized(frame, cv2, cascades)
                     if pos is not None:
-                        final_samples.append(pos)
+                        all_samples.append(pos)
+                        if stage_key == "center":
+                            center_samples.append(pos)
 
-                sec_ceil = int(math.ceil(rem))
-                pct = min(100, int((elapsed / lock_duration) * 100))
-                if sec_ceil != last_sec:
-                    self.status_changed.emit(
-                        f"Final lock ({sec_ceil}s left, {pct}%): Relax & hold CENTER (ignoring mic noise)..."
-                    )
-                    last_sec = sec_ceil
-                time.sleep(0.04)
+                time.sleep(0.03)
 
             if self._stop_event.is_set():
                 return False
 
-            self._anchor = (
-                sum(p[0] for p in final_samples) / len(final_samples),
-                sum(p[1] for p in final_samples) / len(final_samples),
-            )
+            if center_samples:
+                self._anchor = (
+                    sum(p[0] for p in center_samples) / len(center_samples),
+                    sum(p[1] for p in center_samples) / len(center_samples),
+                )
+            elif all_samples:
+                self._anchor = (
+                    sum(p[0] for p in all_samples) / len(all_samples),
+                    sum(p[1] for p in all_samples) / len(all_samples),
+                )
+            else:
+                self._anchor = (0.5, 0.5)
+
             self._smooth_dx = 0.0
             self._smooth_dy = 0.0
             self._rem_x = 0.0
             self._rem_y = 0.0
-            self.status_changed.emit("Calibration complete! Linear cursor + voice active.")
+            self._prev_off_x = 0.0
+            self._prev_off_y = 0.0
+            self.status_changed.emit("30s calibration complete! Linear cursor + voice active.")
             return True
         finally:
             self.calibration_state_changed.emit(False)
