@@ -1,59 +1,58 @@
-import math
 import sys
 import threading
 import time
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 from PySide6.QtCore import QObject, Signal
 
 
 class NoseTrackerWorker(QObject):
-    """Tracks face movement on a webcam for responsive cursor control with no-webcam fallback."""
+    """Tracks face movement with a 5-second guided calibration and maps neutral face to screen center."""
 
-    delta_ready = Signal(int, int)
+    screen_pos_ready = Signal(int, int)
     status_changed = Signal(str)
     error_occurred = Signal(str)
 
     def __init__(
         self,
-        gain_x: float = 95.0,
-        gain_y: float = 85.0,
-        deadzone: float = 0.018,
-        smoothing: float = 0.65,
+        screen_width: int = 1920,
+        screen_height: int = 1080,
+        calibration_seconds: float = 5.0,
+        smoothing: float = 0.35,
+        right_boost: float = 1.25,
     ):
         super().__init__(None)
-        self.gain_x = gain_x
-        self.gain_y = gain_y
-        self.deadzone = deadzone
+        self.screen_width = max(1, int(screen_width))
+        self.screen_height = max(1, int(screen_height))
+        self.calibration_seconds = max(2.0, float(calibration_seconds))
         self.smoothing = smoothing
+        self.right_boost = right_boost
 
         self._stop_event = threading.Event()
         self._recenter_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
-        self._anchor: Optional[Tuple[float, float]] = None
-        self._smooth_dx = 0.0
-        self._smooth_dy = 0.0
-        self._rem_x = 0.0
-        self._rem_y = 0.0
+
+        self._center_x = 0.5
+        self._center_y = 0.5
+        self._range_right = 0.14
+        self._range_left = 0.14
+        self._range_up = 0.12
+        self._range_down = 0.12
+
+        self._cur_x = float(self.screen_width) * 0.5
+        self._cur_y = float(self.screen_height) * 0.5
 
     def recenter(self) -> None:
-        self._anchor = None
-        self._smooth_dx = 0.0
-        self._smooth_dy = 0.0
-        self._rem_x = 0.0
-        self._rem_y = 0.0
         self._recenter_event.set()
-        self.status_changed.emit("Face center reset — look straight ahead.")
+        self.status_changed.emit("Starting 5s calibration — look center first...")
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
         self._stop_event.clear()
-        self._anchor = None
-        self._smooth_dx = 0.0
-        self._smooth_dy = 0.0
-        self._rem_x = 0.0
-        self._rem_y = 0.0
+        self._recenter_event.clear()
+        self._cur_x = float(self.screen_width) * 0.5
+        self._cur_y = float(self.screen_height) * 0.5
         self._thread = threading.Thread(target=self._run_loop, name="FaceTrackerThread", daemon=True)
         self._thread.start()
 
@@ -86,17 +85,123 @@ class NoseTrackerWorker(QObject):
         fx, fy, fw, fh = max(faces, key=lambda r: r[2] * r[3])
         face_cx = (fx + fw * 0.5) / 320.0
         face_cy = (fy + fh * 0.5) / 240.0
+        # Mirror horizontally so moving face right on neck moves right
         mirrored_x = 1.0 - face_cx
         return mirrored_x, face_cy
 
-    def _apply_accel(self, offset: float, gain: float) -> float:
-        mag = abs(offset)
-        if mag < self.deadzone:
-            return 0.0
-        effective = mag - self.deadzone
-        # Non-linear boost: gentle for tiny tilts, fast sweep for larger head turns
-        speed = (effective * gain) + ((effective * 14.0) ** 2)
-        return math.copysign(speed, offset)
+    def _run_calibration(self, cap, cv2, face_cascade) -> bool:
+        start_t = time.monotonic()
+        center_samples: List[Tuple[float, float]] = []
+        max_dx_right = 0.06
+        max_dx_left = 0.06
+        max_dy_up = 0.06
+        max_dy_down = 0.06
+        last_prompt = ""
+
+        while not self._stop_event.is_set():
+            elapsed = time.monotonic() - start_t
+            remaining = max(0.0, self.calibration_seconds - elapsed)
+            if elapsed >= self.calibration_seconds:
+                break
+
+            if elapsed < 1.5:
+                stage = "center"
+                prompt = f"Calibrating ({remaining:.1f}s): Hold face CENTER (screen middle)"
+            elif elapsed < 2.6:
+                stage = "right"
+                prompt = f"Calibrating ({remaining:.1f}s): Move face RIGHT on neck"
+            elif elapsed < 3.7:
+                stage = "left"
+                prompt = f"Calibrating ({remaining:.1f}s): Move face LEFT on neck"
+            elif elapsed < 4.4:
+                stage = "up"
+                prompt = f"Calibrating ({remaining:.1f}s): Tilt face UP"
+            else:
+                stage = "down"
+                prompt = f"Calibrating ({remaining:.1f}s): Tilt face DOWN"
+
+            if prompt != last_prompt:
+                self.status_changed.emit(prompt)
+                last_prompt = prompt
+
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                time.sleep(0.015)
+                continue
+
+            pos = self._detect_face_normalized(frame, cv2, face_cascade)
+            if pos is not None:
+                if stage == "center":
+                    center_samples.append(pos)
+                else:
+                    if not center_samples:
+                        center_samples.append(pos)
+                    cx = sum(p[0] for p in center_samples) / len(center_samples)
+                    cy = sum(p[1] for p in center_samples) / len(center_samples)
+                    dx = pos[0] - cx
+                    dy = pos[1] - cy
+                    if stage == "right" and dx > 0:
+                        max_dx_right = max(max_dx_right, dx)
+                    elif stage == "left" and dx < 0:
+                        max_dx_left = max(max_dx_left, abs(dx))
+                    elif stage == "up" and dy < 0:
+                        max_dy_up = max(max_dy_up, abs(dy))
+                    elif stage == "down" and dy > 0:
+                        max_dy_down = max(max_dy_down, dy)
+
+            time.sleep(0.02)
+
+        if self._stop_event.is_set():
+            return False
+
+        if center_samples:
+            self._center_x = sum(p[0] for p in center_samples) / len(center_samples)
+            self._center_y = sum(p[1] for p in center_samples) / len(center_samples)
+
+        # Slightly tighten effective span so full screen is reachable without straining neck
+        self._range_right = max(0.04, max_dx_right * 0.85)
+        self._range_left = max(0.04, max_dx_left * 0.85)
+        self._range_up = max(0.04, max_dy_up * 0.85)
+        self._range_down = max(0.04, max_dy_down * 0.85)
+
+        self._cur_x = float(self.screen_width) * 0.5
+        self._cur_y = float(self.screen_height) * 0.5
+        self.screen_pos_ready.emit(int(self._cur_x), int(self._cur_y))
+        self.status_changed.emit("Calibration complete! Center face = screen center.")
+        return True
+
+    def _map_to_screen(self, pos: Tuple[float, float]) -> Tuple[int, int]:
+        dx = pos[0] - self._center_x
+        dy = pos[1] - self._center_y
+
+        # Small deadzone near neutral center
+        if abs(dx) < 0.01:
+            dx = 0.0
+        if abs(dy) < 0.01:
+            dy = 0.0
+
+        if dx >= 0:
+            norm_x = min(1.0, (dx * self.right_boost) / self._range_right)
+        else:
+            norm_x = -min(1.0, abs(dx) / self._range_left)
+
+        if dy >= 0:
+            norm_y = min(1.0, dy / self._range_down)
+        else:
+            norm_y = -min(1.0, abs(dy) / self._range_up)
+
+        half_w = float(self.screen_width) * 0.5
+        half_h = float(self.screen_height) * 0.5
+
+        target_x = half_w + (norm_x * half_w)
+        target_y = half_h + (norm_y * half_h)
+
+        self._cur_x += (target_x - self._cur_x) * self.smoothing
+        self._cur_y += (target_y - self._cur_y) * self.smoothing
+
+        ix = max(0, min(self.screen_width - 1, int(round(self._cur_x))))
+        iy = max(0, min(self.screen_height - 1, int(round(self._cur_y))))
+        return ix, iy
 
     def _run_loop(self) -> None:
         try:
@@ -120,46 +225,25 @@ class NoseTrackerWorker(QObject):
             self.status_changed.emit("No webcam detected — voice cursor ('move left/right/up/down', 'click') active.")
             return
 
-        self.status_changed.emit("Face tracking active (say 'recenter' anytime).")
         try:
+            if not self._run_calibration(cap, cv2, face_cascade):
+                return
+
             while not self._stop_event.is_set():
+                if self._recenter_event.is_set():
+                    self._recenter_event.clear()
+                    if not self._run_calibration(cap, cv2, face_cascade):
+                        return
+
                 ok, frame = cap.read()
                 if not ok or frame is None:
                     time.sleep(0.015)
                     continue
 
-                if self._recenter_event.is_set():
-                    self._recenter_event.clear()
-                    self._anchor = None
-
                 pos = self._detect_face_normalized(frame, cv2, face_cascade)
-                if pos is None:
-                    time.sleep(0.01)
-                    continue
-
-                if self._anchor is None:
-                    self._anchor = pos
-                    continue
-
-                off_x = pos[0] - self._anchor[0]
-                off_y = pos[1] - self._anchor[1]
-
-                raw_dx = self._apply_accel(off_x, self.gain_x)
-                raw_dy = self._apply_accel(off_y, self.gain_y)
-
-                self._smooth_dx += (raw_dx - self._smooth_dx) * self.smoothing
-                self._smooth_dy += (raw_dy - self._smooth_dy) * self.smoothing
-
-                total_x = self._smooth_dx + self._rem_x
-                total_y = self._smooth_dy + self._rem_y
-
-                dx_int = int(round(total_x))
-                dy_int = int(round(total_y))
-                self._rem_x = total_x - dx_int
-                self._rem_y = total_y - dy_int
-
-                if dx_int != 0 or dy_int != 0:
-                    self.delta_ready.emit(dx_int, dy_int)
+                if pos is not None:
+                    sx, sy = self._map_to_screen(pos)
+                    self.screen_pos_ready.emit(sx, sy)
 
                 time.sleep(0.01)
         except Exception as exc:

@@ -22,7 +22,11 @@ if IS_WINDOWS:
     MOUSEEVENTF_RIGHTDOWN = 0x0008
     MOUSEEVENTF_RIGHTUP = 0x0010
     MOUSEEVENTF_WHEEL = 0x0800
+    MOUSEEVENTF_ABSOLUTE = 0x8000
     WHEEL_DELTA = 120
+
+    SM_CXSCREEN = 0
+    SM_CYSCREEN = 1
 
     VK_MAP = {
         "backspace": 0x08,
@@ -97,6 +101,15 @@ if IS_WINDOWS:
         ]
 
 
+def get_screen_size() -> Tuple[int, int]:
+    """Return primary screen width and height in pixels."""
+    if not IS_WINDOWS:
+        return 1920, 1080
+    w = int(user32.GetSystemMetrics(SM_CXSCREEN))
+    h = int(user32.GetSystemMetrics(SM_CYSCREEN))
+    return max(1, w), max(1, h)
+
+
 def _send_mouse_inputs(items: List[Tuple[int, int, int]]) -> Tuple[bool, str]:
     if not IS_WINDOWS:
         return True, f"[Dry-run] Mouse actions: {len(items)}"
@@ -110,6 +123,18 @@ def _send_mouse_inputs(items: List[Tuple[int, int, int]]) -> Tuple[bool, str]:
         err = ctypes.get_last_error()
         return False, f"Windows mouse SendInput failed (sent={sent}/{len(inputs)}, winerr={err})."
     return True, "OK"
+
+
+def move_mouse_to_screen(x: int, y: int) -> Tuple[bool, str]:
+    """Move cursor to absolute pixel coordinates (x, y) mapped to screen center origin."""
+    if not IS_WINDOWS:
+        return True, f"[Dry-run] Move to ({x}, {y})"
+    sw, sh = get_screen_size()
+    clamped_x = max(0, min(sw - 1, int(x)))
+    clamped_y = max(0, min(sh - 1, int(y)))
+    abs_x = int(round((clamped_x / max(1, sw - 1)) * 65535))
+    abs_y = int(round((clamped_y / max(1, sh - 1)) * 65535))
+    return _send_mouse_inputs([(abs_x, abs_y, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE)])
 
 
 def move_mouse_relative(dx: int, dy: int) -> Tuple[bool, str]:
