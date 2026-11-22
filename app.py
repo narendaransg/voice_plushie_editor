@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 from PySide6.QtCore import QTimer
-from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import QApplication, QPushButton, QMessageBox, QHBoxLayout, QComboBox
 
 from core.input_windows import (
@@ -24,7 +23,7 @@ from core.voice_worker import VoiceListenerWorker
 from ui.plushie_overlay import PlushieOverlayWindow
 from ui.theme_wizard import ThemeWizard
 from ui.pack_builder import PackBuilderDialog
-from ui.voice_grid import VoiceGridOverlay
+from ui.interactive_labels import InteractiveLabelOverlay
 
 
 WORD_NUMBERS = {
@@ -37,19 +36,19 @@ WORD_NUMBERS = {
     "thirty one": 31, "thirty two": 32, "thirty three": 33, "thirty four": 34, "thirty five": 35,
     "thirty six": 36, "thirty seven": 37, "thirty eight": 38, "thirty nine": 39, "forty": 40,
     "forty one": 41, "forty two": 42, "forty three": 43, "forty four": 44, "forty five": 45,
-    "forty six": 46, "forty seven": 47, "forty eight": 48,
+    "forty six": 46, "forty seven": 47, "forty eight": 48, "forty nine": 49, "fifty": 50,
 }
 
 
 class PlushieController:
-    """Connects overlay, numbered voice grid, continuous mover, keyboard nav, voice listener, and input sender."""
+    """Connects overlay, interactive control labels, continuous mover, keyboard nav, voice listener, and input sender."""
 
     def __init__(self, root_dir: Path, enable_voice: bool = True):
         self.root_dir = Path(root_dir)
         self.enable_voice = enable_voice
 
         self.overlay = PlushieOverlayWindow(self.root_dir)
-        self.grid_overlay = VoiceGridOverlay(cols=8, rows=6)
+        self.label_overlay = InteractiveLabelOverlay()
 
         self._cont_dir: Optional[Tuple[int, int]] = None
         self._cont_scroll: int = 0
@@ -95,20 +94,23 @@ class PlushieController:
         wizard_btn.clicked.connect(self.open_theme_wizard)
         row.addWidget(wizard_btn)
 
-        self.grid_btn = QPushButton("Grid")
-        self.grid_btn.clicked.connect(self.toggle_voice_grid)
-        row.addWidget(self.grid_btn)
+        self.labels_btn = QPushButton("Labels")
+        self.labels_btn.clicked.connect(self.toggle_interactive_labels)
+        row.addWidget(self.labels_btn)
 
         layout.addLayout(row)
 
-    def toggle_voice_grid(self) -> None:
-        if self.grid_overlay.isVisible():
-            self.grid_overlay.hide()
-            self.overlay.status_label.setText("Voice grid hidden.")
+    def toggle_interactive_labels(self) -> None:
+        if self.label_overlay.isVisible():
+            self.label_overlay.clear_labels()
+            self.overlay.status_label.setText("Interactive control labels hidden.")
         else:
             sw, sh = get_screen_size()
-            self.grid_overlay.show_full_screen_grid(sw, sh)
-            self.overlay.status_label.setText("Grid active (1–48): say a number, 'click 14', 'zoom grid', or 'hide grid'.")
+            count = self.label_overlay.scan_and_show(sw, sh)
+            if count > 0:
+                self.overlay.status_label.setText(f"Found {count} controls — say a number or 'click 3', or 'hide labels'.")
+            else:
+                self.overlay.status_label.setText("No interactive controls exposed by active window; try voice move/scroll.")
 
     def _on_continuous_tick(self) -> None:
         if self._cont_dir is not None:
@@ -123,12 +125,10 @@ class PlushieController:
         if self._cont_timer.isActive():
             self._cont_timer.stop()
 
-    def _extract_grid_number(self, text: str) -> Optional[int]:
+    def _extract_target_number(self, text: str) -> Optional[int]:
         m = re.search(r"\b(\d{1,2})\b", text)
         if m:
-            val = int(m.group(1))
-            if 1 <= val <= 48:
-                return val
+            return int(m.group(1))
         cleaned = re.sub(r"[^a-z\s]", " ", text)
         cleaned = re.sub(r"\s+", " ", cleaned).strip()
         for phrase, val in sorted(WORD_NUMBERS.items(), key=lambda kv: -len(kv[0])):
@@ -191,46 +191,38 @@ class PlushieController:
             if was_moving:
                 return {"status": "cursor", "message": "Stopped continuous cursor/scroll motion."}
 
-        # 2. Numbered Voice Grid Overlay commands
-        if any(p in text for p in ("show grid", "open grid", "show numbers", "voice grid", "number grid")):
+        # 2. Interactive UI Control Labels
+        if any(p in text for p in ("show labels", "show targets", "label controls", "show buttons")):
             sw, sh = get_screen_size()
-            self.grid_overlay.show_full_screen_grid(sw, sh)
-            return {"status": "cursor", "message": "Voice grid shown (1–48). Say a number or 'click 14'."}
+            count = self.label_overlay.scan_and_show(sw, sh)
+            if count > 0:
+                return {"status": "cursor", "message": f"Labeled {count} controls — say a number or 'click 2'."}
+            return {"status": "cursor", "message": "No interactive controls found in active window."}
 
-        if any(p in text for p in ("zoom grid", "micro grid", "fine grid", "zoom numbers")):
-            sw, sh = get_screen_size()
-            pos = QCursor.pos()
-            self.grid_overlay.show_micro_grid(sw, sh, pos.x(), pos.y(), box_size=240)
-            return {"status": "cursor", "message": "Micro-grid (1–9) shown around cursor."}
+        if any(p in text for p in ("hide labels", "close labels", "hide targets", "clear labels")):
+            self.label_overlay.clear_labels()
+            return {"status": "cursor", "message": "Interactive control labels hidden."}
 
-        if any(p in text for p in ("hide grid", "close grid", "hide numbers", "clear grid")):
-            self.grid_overlay.hide()
-            return {"status": "cursor", "message": "Voice grid hidden."}
-
-        if self.grid_overlay.isVisible() or text.startswith(("grid ", "cell ", "number ", "jump ", "click ")):
-            cell_num = self._extract_grid_number(text)
-            if cell_num is not None:
-                if not self.grid_overlay.isVisible():
-                    sw, sh = get_screen_size()
-                    self.grid_overlay.show_full_screen_grid(sw, sh)
-                target = self.grid_overlay.get_cell_center(cell_num)
-                if target is not None:
-                    move_mouse_to_screen(target[0], target[1])
-                    if "right click" in text:
-                        mouse_click("right")
-                        self.grid_overlay.hide()
-                        return {"status": "cursor", "message": f"Jumped to cell {cell_num} & right-clicked."}
-                    if "double click" in text:
-                        mouse_double_click()
-                        self.grid_overlay.hide()
-                        return {"status": "cursor", "message": f"Jumped to cell {cell_num} & double-clicked."}
-                    if "click" in text or "tap" in text:
-                        mouse_click("left")
-                        self.grid_overlay.hide()
-                        return {"status": "cursor", "message": f"Jumped to cell {cell_num} & clicked."}
-                    if "keep" not in text:
-                        self.grid_overlay.hide()
-                    return {"status": "cursor", "message": f"Jumped to cell {cell_num} ({target[0]}, {target[1]})."}
+        if self.label_overlay.isVisible():
+            num = self._extract_target_number(text)
+            target = self.label_overlay.get_target_by_number(num) if num is not None else self.label_overlay.get_target_by_name(text)
+            if target is not None:
+                cx, cy = target.center
+                move_mouse_to_screen(cx, cy)
+                if "right click" in text:
+                    mouse_click("right")
+                    self.label_overlay.clear_labels()
+                    return {"status": "cursor", "message": f"Right-clicked control #{target.index}."}
+                if "double click" in text:
+                    mouse_double_click()
+                    self.label_overlay.clear_labels()
+                    return {"status": "cursor", "message": f"Double-clicked control #{target.index}."}
+                if "move" in text or "hover" in text or "point" in text:
+                    self.label_overlay.clear_labels()
+                    return {"status": "cursor", "message": f"Moved cursor to control #{target.index}."}
+                mouse_click("left")
+                self.label_overlay.clear_labels()
+                return {"status": "cursor", "message": f"Clicked control #{target.index}."}
 
         # 3. Continuous Directional Hold & Relative Wheel Modes
         if any(p in text for p in ("start moving", "keep moving", "glide", "drift")):
@@ -384,7 +376,7 @@ class PlushieController:
 
     def shutdown(self) -> None:
         self._stop_continuous()
-        self.grid_overlay.close()
+        self.label_overlay.clear_labels()
         if self.voice_worker is not None:
             self.voice_worker.stop()
         self.overlay.close()

@@ -4,6 +4,10 @@
   "voice_mode": "always_on",
   "wake_phrase": "leon",
   "comfort_mode": false,
-  "night_mode": false,
-  "active_app": "auto"
+  "night_mode": true,
+  "active_app": "clipchamp",
+  "overlay_pos": [
+    1133,
+    184
+  ]
 }
