@@ -230,10 +230,10 @@ class NoseTrackerWorker(QObject):
                 if res is None:
                     return False
 
-            # Final calm 5-second neutral center lock
+            # Final calm 30-second neutral center lock
             final_samples: List[Tuple[float, float]] = []
             start_lock = time.monotonic()
-            lock_duration = 5.0
+            lock_duration = 30.0
             last_sec = -1
 
             while not self._stop_event.is_set():
@@ -241,7 +241,7 @@ class NoseTrackerWorker(QObject):
                     return False
                 elapsed = time.monotonic() - start_lock
                 rem = max(0.0, lock_duration - elapsed)
-                if elapsed >= lock_duration and len(final_samples) >= 15:
+                if elapsed >= lock_duration and len(final_samples) >= 20:
                     break
 
                 ok, frame = cap.read()
@@ -251,9 +251,10 @@ class NoseTrackerWorker(QObject):
                         final_samples.append(pos)
 
                 sec_ceil = int(math.ceil(rem))
+                pct = min(100, int((elapsed / lock_duration) * 100))
                 if sec_ceil != last_sec:
                     self.status_changed.emit(
-                        f"Final lock ({sec_ceil}s): Look straight & relax at CENTER (ignoring mic noise)..."
+                        f"Final lock ({sec_ceil}s left, {pct}%): Relax & hold CENTER (ignoring mic noise)..."
                     )
                     last_sec = sec_ceil
                 time.sleep(0.04)
