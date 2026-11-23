@@ -145,14 +145,15 @@ class VisionGrounder:
         closed = cv2.morphologyEx(grid_mask, cv2.MORPH_CLOSE, close_kernel, iterations=1)
 
         contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        min_area = max(2500, int(w * h * 0.012))
+        min_area = max(1800, int(w * h * 0.008))
         max_area = int(w * h * 0.94)
 
         raw_boxes: List[Tuple[int, int, int, int]] = []
         for cnt in contours:
             x, y, cw, ch = cv2.boundingRect(cnt)
             area = cw * ch
-            if min_area <= area <= max_area and cw >= 35 and ch >= 30:
+            near_right_edge = (x + cw) >= int(w * 0.90) and cw >= 24 and ch >= int(h * 0.25)
+            if (min_area <= area <= max_area and cw >= 35 and ch >= 30) or near_right_edge:
                 raw_boxes.append((x, y, cw, ch))
 
         panels = self._merge_boxes(raw_boxes, iou_threshold=0.20)
