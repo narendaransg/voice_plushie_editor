@@ -77,6 +77,10 @@ class PlushieController:
 
         self._pending_confirm: Optional[dict] = None
         self.overlay.handle_utterance = self.on_utterance  # type: ignore[method-assign]
+        app_inst = QApplication.instance()
+        if app_inst is not None:
+            app_inst.aboutToQuit.connect(self.shutdown)
+        self.overlay.destroyed.connect(lambda *_: self.shutdown())
 
         self.run_tool_scan(announce=True)
 
@@ -415,15 +419,39 @@ class PlushieController:
                     "message": f"Drilled down to '{self.label_overlay.level_name}' ({sub_count}) — say 'go up' to return.",
                 }
 
-        # 6. Fine horizontal hover / timeline positioning (works both normally and while holding a dragged clip)
-        if any(p in text for p in ("hover left", "nudge left", "scrub left", "tiny left")):
+        # 6. Rich hover & fine positioning (4-way hover, timeline edges, and active sectors)
+        suffix = " — say 'drop' to place." if self._is_dragging else ""
+        if any(p in text for p in ("hover timeline left", "timeline left")):
+            sw, sh = get_screen_size()
+            trect = self.label_overlay.get_timeline_rect(sw, sh) if hasattr(self.label_overlay, "get_timeline_rect") else self.label_overlay._last_win_rect
+            if trect is not None:
+                move_mouse_to_screen(trect.left() + 24, trect.center().y())
+                return {"status": "cursor", "message": f"Hovering timeline left edge{suffix}."}
+        if any(p in text for p in ("hover timeline right", "timeline right")):
+            sw, sh = get_screen_size()
+            trect = self.label_overlay.get_timeline_rect(sw, sh) if hasattr(self.label_overlay, "get_timeline_rect") else self.label_overlay._last_win_rect
+            if trect is not None:
+                move_mouse_to_screen(trect.right() - 24, trect.center().y())
+                return {"status": "cursor", "message": f"Hovering timeline right edge{suffix}."}
+        if text.startswith("hover "):
+            for sec in getattr(self.label_overlay, "_detected_sectors", []):
+                sec_low = sec.name.lower()
+                if sec_low and sec_low in text:
+                    move_mouse_to_screen(*sec.center)
+                    return {"status": "cursor", "message": f"Hovering {sec.name}{suffix}."}
+
+        if any(p in text for p in ("hover left", "nudge left", "scrub left", "tiny left", "step left")):
             ok, detail = move_mouse_relative(-fine_step, 0)
-            suffix = " — say 'drop' to place." if self._is_dragging else ""
-            return {"status": "cursor", "message": f"Moved left ({fine_step}px): {detail}{suffix}" if ok else detail}
-        if any(p in text for p in ("hover right", "nudge right", "scrub right", "tiny right")):
+            return {"status": "cursor", "message": f"Hover left ({fine_step}px): {detail}{suffix}" if ok else detail}
+        if any(p in text for p in ("hover right", "nudge right", "scrub right", "tiny right", "step right")):
             ok, detail = move_mouse_relative(fine_step, 0)
-            suffix = " — say 'drop' to place." if self._is_dragging else ""
-            return {"status": "cursor", "message": f"Moved right ({fine_step}px): {detail}{suffix}" if ok else detail}
+            return {"status": "cursor", "message": f"Hover right ({fine_step}px): {detail}{suffix}" if ok else detail}
+        if any(p in text for p in ("hover up", "nudge up", "tiny up", "step up")):
+            ok, detail = move_mouse_relative(0, -fine_step)
+            return {"status": "cursor", "message": f"Hover up ({fine_step}px): {detail}{suffix}" if ok else detail}
+        if any(p in text for p in ("hover down", "nudge down", "tiny down", "step down")):
+            ok, detail = move_mouse_relative(0, fine_step)
+            return {"status": "cursor", "message": f"Hover down ({fine_step}px): {detail}{suffix}" if ok else detail}
 
         # 7. Continuous Directional Hold & Relative Wheel Modes
         if any(p in text for p in ("start moving", "keep moving", "glide", "drift")):
@@ -584,12 +612,24 @@ class PlushieController:
         return result
 
     def shutdown(self) -> None:
+        if getattr(self, "_shutting_down", False):
+            return
+        self._shutting_down = True
         self._stop_continuous()
         self._release_drag_if_active()
-        self.label_overlay.clear_labels()
+        if hasattr(self.label_overlay, "close_overlay"):
+            self.label_overlay.close_overlay()
+        else:
+            self.label_overlay.clear_labels()
         if self.voice_worker is not None:
-            self.voice_worker.stop()
-        self.overlay.close()
+            try:
+                self.voice_worker.stop()
+            except Exception:
+                pass
+        try:
+            self.overlay.close()
+        except Exception:
+            pass
 
 
 def main() -> None:

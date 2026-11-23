@@ -520,6 +520,10 @@ class InteractiveLabelOverlay(QWidget):
         if app_inst is not None:
             app_inst.processEvents()
 
+    def close_overlay(self) -> None:
+        self.clear_labels()
+        self.close()
+
     def get_target_by_number(self, num: int) -> Optional[InteractiveTarget]:
         for t in self._targets:
             if t.index == num:
