@@ -321,16 +321,16 @@ class PlushieController:
                 return {"status": "cursor", "message": f"Moved up to '{prev}'."}
             return {"status": "cursor", "message": "Exited overlay."}
 
-        # 4. Initiate drag on current cursor or numbered target -> shows drop destinations
-        if any(k in text for k in ("drag it", "drag this", "grab it", "grab this", "pick up")) or (
-            ("drag" in text or "grab" in text) and "to" not in text
+        # 4. Initiate drag on current cursor or numbered target -> always shows drop destinations
+        if any(k in text for k in ("drag", "grab", "pick up")) and not any(
+            k in text for k in ("drop", "paste", "place", "release", "drag end")
         ):
-            if self.label_overlay.isVisible():
+            if self.label_overlay.isVisible() and self.label_overlay.level_name != "drop_targets":
                 num = self._extract_target_number(text)
                 target = (
                     self.label_overlay.get_target_by_number(num)
                     if num is not None
-                    else self.label_overlay.get_target_by_name(text)
+                    else (self.label_overlay._targets[0] if self.label_overlay._targets else None)
                 )
                 if target is not None:
                     return self._begin_drag_and_show_destinations(target.center, f"#{target.index} {target.name}")
