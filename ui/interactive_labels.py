@@ -31,8 +31,8 @@ VIDEO_EDITOR_UI_MAP: Dict[str, Dict[str, str]] = {
         "purpose": "Inspect the video frame, play/pause playback, step frames, and scrub the playhead.",
     },
     "right_inspector": {
-        "title": "Right Property Inspector",
-        "purpose": "Edit selected clip captions, audio, color, speed, effects, or keyframes.",
+        "title": "Right Inspector Rail",
+        "purpose": "Access Captions, Audio, Fade, Filters, Effects, Adjust colors, Upscale, and Speed.",
     },
     "timeline": {
         "title": "Timeline & Multi-Track Editor",
@@ -70,6 +70,17 @@ def _get_foreground_window_rect(screen_w: int, screen_h: int) -> QRect:
     return QRect(0, 0, screen_w, screen_h)
 
 
+def _clamp_to_window(rect: QRect, bounds: QRect) -> QRect:
+    clipped = rect.intersected(bounds)
+    if clipped.isValid() and clipped.width() >= 12 and clipped.height() >= 12:
+        return clipped
+    x = max(bounds.left(), min(bounds.right() - 24, rect.left()))
+    y = max(bounds.top(), min(bounds.bottom() - 24, rect.top()))
+    w = max(12, min(bounds.right() - x, rect.width()))
+    h = max(12, min(bounds.bottom() - y, rect.height()))
+    return QRect(x, y, w, h)
+
+
 def _match_editor_purpose(
     label: str,
     fallback_key: str,
@@ -99,18 +110,18 @@ def _match_editor_purpose(
 def _fallback_sectors(win: QRect, knowledge_map: Optional[Dict[str, str]] = None) -> List[InteractiveTarget]:
     wx, wy, ww, wh = win.left(), win.top(), win.width(), win.height()
     sectors_spec = [
-        ("Header & Export", QRect(wx + int(ww * 0.06), wy + 4, int(ww * 0.90), 44), "header"),
-        ("Left Tool Rail", QRect(wx + 2, wy + int(wh * 0.08), 62, int(wh * 0.62)), "left_rail"),
-        ("Media Drawer", QRect(wx + int(ww * 0.06), wy + int(wh * 0.08), int(ww * 0.22), int(wh * 0.62)), "left_drawer"),
-        ("Preview & Play", QRect(wx + int(ww * 0.29), wy + int(wh * 0.08), int(ww * 0.62), int(wh * 0.60)), "preview_transport"),
-        ("Right Inspector", QRect(wx + ww - 68, wy + int(wh * 0.08), 66, int(wh * 0.66)), "right_inspector"),
-        ("Timeline & Tracks", QRect(wx + int(ww * 0.06), wy + int(wh * 0.70), int(ww * 0.92), int(wh * 0.28)), "timeline"),
+        ("Header & Export", QRect(wx + int(ww * 0.05), wy + 4, int(ww * 0.90), 42), "header"),
+        ("Left Tool Rail", QRect(wx + 2, wy + int(wh * 0.07), 56, int(wh * 0.62)), "left_rail"),
+        ("Media Drawer", QRect(wx + int(ww * 0.05), wy + int(wh * 0.07), int(ww * 0.19), int(wh * 0.62)), "left_drawer"),
+        ("Preview & Play", QRect(wx + int(ww * 0.25), wy + int(wh * 0.07), int(ww * 0.68), int(wh * 0.60)), "preview_transport"),
+        ("Right Inspector", QRect(wx + ww - 58, wy + int(wh * 0.07), 54, int(wh * 0.66)), "right_inspector"),
+        ("Timeline & Tracks", QRect(wx + int(ww * 0.05), wy + int(wh * 0.69), int(ww * 0.90), int(wh * 0.28)), "timeline"),
     ]
     return [
         InteractiveTarget(
             index=i,
             name=title,
-            rect=rect,
+            rect=_clamp_to_window(rect, win),
             purpose=_match_editor_purpose(title, key, knowledge_map),
             kind="sector",
         )
@@ -121,6 +132,7 @@ def _fallback_sectors(win: QRect, knowledge_map: Optional[Dict[str, str]] = None
 def _load_scanned_controls_in_rect(
     scan_file: Optional[Path],
     region: QRect,
+    bounds: QRect,
     screen_w: int,
     screen_h: int,
     knowledge_map: Optional[Dict[str, str]] = None,
@@ -147,7 +159,7 @@ def _load_scanned_controls_in_rect(
         h = bottom - top
         if w < 12 or h < 12 or w > screen_w * 0.9 or h > screen_h * 0.9:
             continue
-        qrect = QRect(left, top, w, h)
+        qrect = _clamp_to_window(QRect(left, top, w, h), bounds)
         if not region.intersects(qrect):
             continue
         if any(
@@ -236,12 +248,12 @@ class InteractiveLabelOverlay(QWidget):
         detected_targets: List[InteractiveTarget] = []
         if frame is not None:
             panels = self.grounder.detect_panels(frame, max_panels=8)
-            for p in panels:
+            for idx, p in enumerate(panels, start=1):
                 px, py, pw, ph = p.bbox
-                qrect = QRect(win.left() + px, win.top() + py, pw, ph)
+                qrect = _clamp_to_window(QRect(win.left() + px, win.top() + py, pw, ph), win)
                 detected_targets.append(
                     InteractiveTarget(
-                        index=p.index,
+                        index=idx,
                         name=p.label,
                         rect=qrect,
                         purpose=_match_editor_purpose(p.label, "timeline", self.knowledge_map),
@@ -266,9 +278,9 @@ class InteractiveLabelOverlay(QWidget):
         force_subzone: bool = False,
     ) -> int:
         self._history.append((self._level_name, list(self._targets)))
+        win = self._last_win_rect or _get_foreground_window_rect(screen_w, screen_h)
 
         if target.kind == "sector" and not force_subzone:
-            win = self._last_win_rect or _get_foreground_window_rect(screen_w, screen_h)
             frame = self._last_frame if self._last_frame is not None else self._capture_clean_window(win)
             detail_targets: List[InteractiveTarget] = []
 
@@ -285,13 +297,13 @@ class InteractiveLabelOverlay(QWidget):
                     knowledge_map=self.knowledge_map,
                     max_elements=18,
                 )
-                for el in elems:
+                for idx, el in enumerate(elems, start=1):
                     ex, ey, ew, eh = el.bbox
-                    qrect = QRect(win.left() + ex, win.top() + ey, ew, eh)
+                    qrect = _clamp_to_window(QRect(win.left() + ex, win.top() + ey, ew, eh), win)
                     purpose = el.description or _match_editor_purpose(el.label, "preview_transport", self.knowledge_map)
                     detail_targets.append(
                         InteractiveTarget(
-                            index=el.index,
+                            index=idx,
                             name=el.label,
                             rect=qrect,
                             purpose=purpose,
@@ -301,7 +313,7 @@ class InteractiveLabelOverlay(QWidget):
 
             if len(detail_targets) < 2:
                 scanned_hits = _load_scanned_controls_in_rect(
-                    self.scan_file, target.rect, screen_w, screen_h, self.knowledge_map, max_items=18
+                    self.scan_file, target.rect, win, screen_w, screen_h, self.knowledge_map, max_items=18
                 )
                 if len(scanned_hits) >= 2:
                     detail_targets = scanned_hits
@@ -316,7 +328,7 @@ class InteractiveLabelOverlay(QWidget):
                     InteractiveTarget(
                         index=sz.index,
                         name=sz.label,
-                        rect=QRect(sz.bbox[0], sz.bbox[1], sz.bbox[2], sz.bbox[3]),
+                        rect=_clamp_to_window(QRect(sz.bbox[0], sz.bbox[1], sz.bbox[2], sz.bbox[3]), win),
                         purpose=target.purpose,
                         kind="subzone",
                     )
@@ -332,7 +344,7 @@ class InteractiveLabelOverlay(QWidget):
                 InteractiveTarget(
                     index=sz.index,
                     name=f"{target.name} [{sz.label}]",
-                    rect=QRect(sz.bbox[0], sz.bbox[1], sz.bbox[2], sz.bbox[3]),
+                    rect=_clamp_to_window(QRect(sz.bbox[0], sz.bbox[1], sz.bbox[2], sz.bbox[3]), win),
                     purpose=target.purpose,
                     kind="subzone",
                 )
@@ -398,8 +410,8 @@ class InteractiveLabelOverlay(QWidget):
             tag = f"{t.index}" if not t.name else f"{t.index}:{t.name[:14]}"
             badge_w = max(26, min(145, len(tag) * 7 + 12))
             badge_h = 20
-            bx = max(0, min(self.width() - badge_w, t.rect.left() + 2))
-            by = max(0, min(self.height() - badge_h, t.rect.top() + 2))
+            bx = max(t.rect.left() + 2, min(self.width() - badge_w - 2, t.rect.left() + 2))
+            by = max(t.rect.top() + 2, min(self.height() - badge_h - 2, t.rect.top() + 2))
             badge = QRect(bx, by, badge_w, badge_h)
 
             painter.fillRect(badge, QColor(16, 22, 34, 238))
