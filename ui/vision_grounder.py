@@ -103,7 +103,7 @@ class VisionGrounder:
 
     @classmethod
     def _merge_boxes(
-        cls, boxes: List[Tuple[int, int, int, int]], iou_threshold: float = 0.25
+        cls, boxes: List[Tuple[int, int, int, int]], iou_threshold: float = 0.45
     ) -> List[Tuple[int, int, int, int]]:
         merged: List[Tuple[int, int, int, int]] = []
         for box in sorted(boxes, key=lambda r: (r[1], r[0])):
@@ -122,41 +122,62 @@ class VisionGrounder:
         return merged
 
     def detect_panels(self, frame_bgr: np.ndarray, max_panels: int = 8) -> List[DetectedRegion]:
-        """Detect major UI containers/panels dynamically via edges, gradients, and structural lines."""
+        """Detect major UI containers/panels dynamically via divider lines and distinct regions."""
         h, w = frame_bgr.shape[:2]
         if h < 50 or w < 50:
             return []
 
         gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
         blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+        edges = cv2.Canny(blurred, 25, 95)
 
-        edges_sharp = cv2.Canny(gray, 25, 90)
-        edges_soft = cv2.Canny(blurred, 30, 100)
-        edges = cv2.bitwise_or(edges_sharp, edges_soft)
-
-        h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(24, w // 14), 1))
-        v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(24, h // 14)))
+        h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(40, w // 6), 1))
+        v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(40, h // 6)))
 
         h_lines = cv2.morphologyEx(edges, cv2.MORPH_OPEN, h_kernel)
         v_lines = cv2.morphologyEx(edges, cv2.MORPH_OPEN, v_kernel)
 
-        grid_mask = cv2.bitwise_or(edges, cv2.bitwise_or(h_lines, v_lines))
-        close_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9))
-        closed = cv2.morphologyEx(grid_mask, cv2.MORPH_CLOSE, close_kernel, iterations=1)
+        # Find prominent horizontal and vertical split coordinates
+        h_proj = np.sum(h_lines > 0, axis=1)
+        v_proj = np.sum(v_lines > 0, axis=0)
 
-        contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        min_area = max(1800, int(w * h * 0.008))
-        max_area = int(w * h * 0.94)
+        y_splits = [0]
+        for y in range(int(h * 0.05), int(h * 0.92)):
+            if h_proj[y] >= int(w * 0.25) and all(abs(y - prev) > int(h * 0.08) for prev in y_splits):
+                y_splits.append(y)
+        y_splits.append(h)
 
-        raw_boxes: List[Tuple[int, int, int, int]] = []
-        for cnt in contours:
-            x, y, cw, ch = cv2.boundingRect(cnt)
-            area = cw * ch
-            near_right_edge = (x + cw) >= int(w * 0.90) and cw >= 24 and ch >= int(h * 0.25)
-            if (min_area <= area <= max_area and cw >= 35 and ch >= 30) or near_right_edge:
-                raw_boxes.append((x, y, cw, ch))
+        x_splits = [0]
+        for x in range(int(w * 0.03), int(w * 0.97)):
+            if v_proj[x] >= int(h * 0.20) and all(abs(x - prev) > int(w * 0.05) for prev in x_splits):
+                x_splits.append(x)
+        x_splits.append(w)
 
-        panels = self._merge_boxes(raw_boxes, iou_threshold=0.20)
+        grid_boxes: List[Tuple[int, int, int, int]] = []
+        for r in range(len(y_splits) - 1):
+            y1, y2 = y_splits[r], y_splits[r + 1]
+            if y2 - y1 < 32:
+                continue
+            for c in range(len(x_splits) - 1):
+                x1, x2 = x_splits[c], x_splits[c + 1]
+                if x2 - x1 < 36:
+                    continue
+                area = (x2 - x1) * (y2 - y1)
+                if area >= max(2400, int(w * h * 0.012)):
+                    grid_boxes.append((x1, y1, x2 - x1, y2 - y1))
+
+        # Fallback to contour detection if structural grid lines are minimal
+        if len(grid_boxes) < 2:
+            close_k = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+            closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, close_k, iterations=1)
+            contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for cnt in contours:
+                x, y, cw, ch = cv2.boundingRect(cnt)
+                area = cw * ch
+                if max(2000, int(w * h * 0.01)) <= area <= int(w * h * 0.85) and cw >= 35 and ch >= 30:
+                    grid_boxes.append((x, y, cw, ch))
+
+        panels = self._merge_boxes(grid_boxes, iou_threshold=0.50)
         panels = sorted(panels, key=lambda r: r[2] * r[3], reverse=True)[:max_panels]
         panels = sorted(panels, key=lambda r: (r[1] // max(1, h // 4), r[0]))
 
