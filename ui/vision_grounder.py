@@ -34,7 +34,7 @@ class DetectedRegion:
 
 
 class VisionGrounder:
-    """Dynamic OpenCV panel segmenter + scoped OCR/contour element detector."""
+    """Recursive UI panel/group & scoped sub-region grounder (MS Office KeyTip style)."""
 
     def __init__(self) -> None:
         self._ocr: Optional[Any] = None
@@ -83,7 +83,7 @@ class VisionGrounder:
             rel_x2 = min(width, ex_x + ex_w - left)
             rel_y2 = min(height, ex_y + ex_h - top)
             if rel_x2 > rel_x1 and rel_y2 > rel_y1:
-                cv2.rectangle(bgr, (rel_x1, rel_y1), (rel_x2, rel_y2), (30, 30, 30), -1)
+                cv2.rectangle(bgr, (rel_x1, rel_y1), (rel_x2, rel_y2), (25, 25, 32), -1)
 
         return bgr
 
@@ -101,94 +101,77 @@ class VisionGrounder:
         union = float(aw * ah + bw * bh - inter)
         return inter / union if union > 0 else 0.0
 
+    @staticmethod
+    def _contains(outer: Tuple[int, int, int, int], inner: Tuple[int, int, int, int], pad: int = 6) -> bool:
+        ox, oy, ow, oh = outer
+        ix, iy, iw, ih = inner
+        return (
+            ix >= ox - pad
+            and iy >= oy - pad
+            and (ix + iw) <= (ox + ow + pad)
+            and (iy + ih) <= (oy + oh + pad)
+            and (iw * ih) < (ow * oh * 0.88)
+        )
+
     @classmethod
-    def _merge_boxes(
+    def _dedupe_boxes(
         cls, boxes: List[Tuple[int, int, int, int]], iou_threshold: float = 0.45
     ) -> List[Tuple[int, int, int, int]]:
-        merged: List[Tuple[int, int, int, int]] = []
-        for box in sorted(boxes, key=lambda r: (r[1], r[0])):
-            placed = False
-            for idx, existing in enumerate(merged):
-                if cls._iou(box, existing) >= iou_threshold:
-                    x1 = min(existing[0], box[0])
-                    y1 = min(existing[1], box[1])
-                    x2 = max(existing[0] + existing[2], box[0] + box[2])
-                    y2 = max(existing[1] + existing[3], box[1] + box[3])
-                    merged[idx] = (x1, y1, x2 - x1, y2 - y1)
-                    placed = True
-                    break
-            if not placed:
-                merged.append(box)
-        return merged
+        kept: List[Tuple[int, int, int, int]] = []
+        for box in sorted(boxes, key=lambda r: r[2] * r[3], reverse=True):
+            if any(cls._iou(box, ex) >= iou_threshold for ex in kept):
+                continue
+            kept.append(box)
+        return kept
 
     def detect_panels(self, frame_bgr: np.ndarray, max_panels: int = 8) -> List[DetectedRegion]:
-        """Detect major UI containers/panels dynamically via divider lines and distinct regions."""
+        """Detect distinct UI containers/groups without slicing across full-screen lines."""
         h, w = frame_bgr.shape[:2]
         if h < 50 or w < 50:
             return []
 
         gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
         blurred = cv2.GaussianBlur(gray, (3, 3), 0)
-        edges = cv2.Canny(blurred, 25, 95)
+        edges = cv2.Canny(blurred, 30, 105)
 
-        h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(40, w // 6), 1))
-        v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(40, h // 6)))
+        # Group nearby UI edges into container blocks without merging the whole screen
+        dilate_k = cv2.getStructuringElement(cv2.MORPH_RECT, (11, 11))
+        blocks = cv2.dilate(edges, dilate_k, iterations=2)
+        contours, _ = cv2.findContours(blocks, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        h_lines = cv2.morphologyEx(edges, cv2.MORPH_OPEN, h_kernel)
-        v_lines = cv2.morphologyEx(edges, cv2.MORPH_OPEN, v_kernel)
+        min_area = max(3500, int(w * h * 0.015))
+        max_area = int(w * h * 0.75)
 
-        # Find prominent horizontal and vertical split coordinates
-        h_proj = np.sum(h_lines > 0, axis=1)
-        v_proj = np.sum(v_lines > 0, axis=0)
+        candidates: List[Tuple[int, int, int, int]] = []
+        for cnt in contours:
+            x, y, cw, ch = cv2.boundingRect(cnt)
+            area = cw * ch
+            is_side_rail = ch >= int(h * 0.25) and 28 <= cw <= int(w * 0.25) and area >= 2500
+            is_top_bar = cw >= int(w * 0.25) and 28 <= ch <= int(h * 0.16) and area >= 2500
+            if (min_area <= area <= max_area and cw >= 45 and ch >= 40) or is_side_rail or is_top_bar:
+                candidates.append((x, y, cw, ch))
 
-        y_splits = [0]
-        for y in range(int(h * 0.05), int(h * 0.92)):
-            if h_proj[y] >= int(w * 0.25) and all(abs(y - prev) > int(h * 0.08) for prev in y_splits):
-                y_splits.append(y)
-        y_splits.append(h)
+        deduped = self._dedupe_boxes(candidates, iou_threshold=0.45)
 
-        x_splits = [0]
-        for x in range(int(w * 0.03), int(w * 0.97)):
-            if v_proj[x] >= int(h * 0.20) and all(abs(x - prev) > int(w * 0.05) for prev in x_splits):
-                x_splits.append(x)
-        x_splits.append(w)
-
-        grid_boxes: List[Tuple[int, int, int, int]] = []
-        for r in range(len(y_splits) - 1):
-            y1, y2 = y_splits[r], y_splits[r + 1]
-            if y2 - y1 < 32:
+        # Remove huge parent boxes that swallow multiple smaller distinct groups
+        filtered: List[Tuple[int, int, int, int]] = []
+        for box in deduped:
+            contained_count = sum(1 for other in deduped if other != box and self._contains(box, other))
+            if contained_count >= 2 and (box[2] * box[3]) > int(w * h * 0.45):
                 continue
-            for c in range(len(x_splits) - 1):
-                x1, x2 = x_splits[c], x_splits[c + 1]
-                if x2 - x1 < 36:
-                    continue
-                area = (x2 - x1) * (y2 - y1)
-                if area >= max(2400, int(w * h * 0.012)):
-                    grid_boxes.append((x1, y1, x2 - x1, y2 - y1))
+            filtered.append(box)
 
-        # Fallback to contour detection if structural grid lines are minimal
-        if len(grid_boxes) < 2:
-            close_k = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-            closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, close_k, iterations=1)
-            contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            for cnt in contours:
-                x, y, cw, ch = cv2.boundingRect(cnt)
-                area = cw * ch
-                if max(2000, int(w * h * 0.01)) <= area <= int(w * h * 0.85) and cw >= 35 and ch >= 30:
-                    grid_boxes.append((x, y, cw, ch))
-
-        panels = self._merge_boxes(grid_boxes, iou_threshold=0.50)
-        panels = sorted(panels, key=lambda r: r[2] * r[3], reverse=True)[:max_panels]
-        panels = sorted(panels, key=lambda r: (r[1] // max(1, h // 4), r[0]))
+        chosen = (filtered if filtered else deduped)[:max_panels]
+        chosen.sort(key=lambda r: (r[1] // max(1, h // 4), r[0]))
 
         return [
             DetectedRegion(
                 index=i + 1,
-                label=f"Sector {i + 1}",
+                label=f"Group {i + 1}",
                 bbox=box,
                 kind="panel",
             )
-            for i, box in enumerate(panels)
+            for i, box in enumerate(chosen)
         ]
 
     def detect_sector_elements(
@@ -196,9 +179,9 @@ class VisionGrounder:
         frame_bgr: np.ndarray,
         sector_bbox: Tuple[int, int, int, int],
         knowledge_map: Optional[Dict[str, str]] = None,
-        max_elements: int = 18,
+        max_elements: int = 16,
     ) -> List[DetectedRegion]:
-        """Detect interactive elements and OCR text labels strictly inside sector_bbox."""
+        """Detect sub-groups, buttons, and OCR text labels strictly inside sector_bbox."""
         sx, sy, sw, sh = sector_bbox
         fh, fw = frame_bgr.shape[:2]
         x1 = max(0, sx)
@@ -225,28 +208,39 @@ class VisionGrounder:
                         ys = [int(pt[1]) for pt in quad]
                         bx = x1 + max(0, min(xs))
                         by = y1 + max(0, min(ys))
-                        bw = max(12, max(xs) - min(xs))
-                        bh = max(10, max(ys) - min(ys))
+                        bw = max(14, max(xs) - min(xs))
+                        bh = max(12, max(ys) - min(ys))
                         desc = self._lookup_knowledge(text, knowledge_map)
                         candidates.append((text, (bx, by, bw, bh), score, desc))
             except Exception:
                 pass
 
         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-        edges = cv2.Canny(gray, 35, 120)
-        dilate_k = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+        edges = cv2.Canny(gray, 40, 130)
+        dilate_k = cv2.getStructuringElement(cv2.MORPH_RECT, (6, 6))
         dilated = cv2.dilate(edges, dilate_k, iterations=1)
         contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
+        min_w = max(18, min(48, cw // 8))
+        min_h = max(16, min(40, ch // 8))
+        max_w = max(min_w + 10, int(cw * 0.85))
+        max_h = max(min_h + 10, int(ch * 0.85))
+
         for cnt in contours:
             rx, ry, rw, rh = cv2.boundingRect(cnt)
-            if 14 <= rw <= max(28, cw // 2) and 14 <= rh <= max(28, ch // 2):
+            if min_w <= rw <= max_w and min_h <= rh <= max_h:
                 box = (x1 + rx, y1 + ry, rw, rh)
-                if not any(self._iou(box, c[1]) > 0.40 for c in candidates):
-                    candidates.append(("Control", box, 0.7, ""))
+                if not any(self._iou(box, c[1]) > 0.35 for c in candidates):
+                    candidates.append(("Item", box, 0.7, ""))
 
-        candidates.sort(key=lambda c: (c[1][1] // 24, c[1][0]))
-        trimmed = candidates[:max_elements]
+        deduped_items: List[Tuple[str, Tuple[int, int, int, int], float, str]] = []
+        for item in sorted(candidates, key=lambda c: c[1][2] * c[1][3], reverse=True):
+            if any(self._iou(item[1], ex[1]) > 0.45 for ex in deduped_items):
+                continue
+            deduped_items.append(item)
+
+        deduped_items.sort(key=lambda c: (c[1][1] // max(18, ch // 6), c[1][0]))
+        trimmed = deduped_items[:max_elements]
 
         return [
             DetectedRegion(
@@ -264,8 +258,15 @@ class VisionGrounder:
     def subdivide_box(
         bbox: Tuple[int, int, int, int], rows: int = 2, cols: int = 2
     ) -> List[DetectedRegion]:
-        """Split a dense target box into a clean sub-zone grid for fine clicks."""
+        """Split any target box into numbered sub-zones for recursive deeper drill-down."""
         x, y, w, h = bbox
+        if w >= h * 2.2 and w >= 120:
+            rows, cols = 1, 3
+        elif h >= w * 2.2 and h >= 120:
+            rows, cols = 3, 1
+        else:
+            rows, cols = rows, cols
+
         cell_w = max(1, w // cols)
         cell_h = max(1, h // rows)
         out: List[DetectedRegion] = []
@@ -279,7 +280,7 @@ class VisionGrounder:
                 out.append(
                     DetectedRegion(
                         index=idx,
-                        label=f"Zone {idx}",
+                        label=f"Sub {idx}",
                         bbox=(cx, cy, max(1, cw), max(1, ch)),
                         kind="subzone",
                     )
