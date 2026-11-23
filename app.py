@@ -7,6 +7,12 @@ from typing import Any, Dict, Optional, Tuple
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication, QPushButton, QMessageBox, QHBoxLayout, QComboBox
 
+from core.editor_profiles import (
+    build_knowledge_map,
+    detect_editor_key,
+    load_profiles_from_dir,
+    match_editor_macro,
+)
 from core.input_windows import (
     check_target_window,
     send_key_combo,
@@ -42,16 +48,21 @@ WORD_NUMBERS = {
 
 
 class PlushieController:
-    """Connects overlay, startup tool scanner + knowledge map, multi-level labels, mover, keyboard nav, and voice."""
+    """Connects overlay, dynamic editor profiles, multi-level labels, hover-first mover, keyboard nav, and voice."""
 
     def __init__(self, root_dir: Path, enable_voice: bool = True):
         self.root_dir = Path(root_dir)
         self.enable_voice = enable_voice
         self.scan_file = self.root_dir / "ui" / "active_tool_map.json"
+        self.profiles_dir = self.root_dir / "config" / "profiles"
+        self.editor_profiles: Dict[str, Dict[str, Any]] = load_profiles_from_dir(self.profiles_dir)
+        self.active_editor_key: str = "clipchamp"
+        self.active_knowledge_map: Dict[str, str] = build_knowledge_map(None)
         self.tool_map: Dict[str, Any] = {}
 
         self.overlay = PlushieOverlayWindow(self.root_dir)
         self.label_overlay = InteractiveLabelOverlay(scan_file=self.scan_file)
+        self.label_overlay.set_knowledge_map(self.active_knowledge_map)
 
         self._cont_dir: Optional[Tuple[int, int]] = None
         self._cont_scroll: int = 0
@@ -65,7 +76,6 @@ class PlushieController:
         self._pending_confirm: Optional[dict] = None
         self.overlay.handle_utterance = self.on_utterance  # type: ignore[method-assign]
 
-        # Run startup scan on current tool & map with video editor knowledge
         self.run_tool_scan(announce=True)
 
         self.voice_worker: Optional[VoiceListenerWorker] = None
@@ -80,13 +90,32 @@ class PlushieController:
             self.voice_worker.error_occurred.connect(self._on_voice_error)
             self.voice_worker.start()
 
+    def _sync_active_editor_profile(self) -> Dict[str, Any]:
+        self.editor_profiles = load_profiles_from_dir(self.profiles_dir)
+        title = str(self.tool_map.get("window_title") or "")
+        proc = str(self.tool_map.get("process_name") or "")
+        detected = str(self.tool_map.get("detected_tool") or "")
+        combined_title = f"{title} {detected}".strip()
+
+        key = detect_editor_key(combined_title, proc, self.editor_profiles)
+        self.active_editor_key = key
+        profile = self.editor_profiles.get(key, {})
+
+        if hasattr(self.overlay, "engine") and isinstance(getattr(self.overlay.engine, "settings", None), dict):
+            self.overlay.engine.settings["active_app"] = key
+
+        self.active_knowledge_map = build_knowledge_map(profile)
+        self.label_overlay.set_knowledge_map(self.active_knowledge_map)
+        return profile
+
     def run_tool_scan(self, announce: bool = False) -> Dict[str, Any]:
         self.tool_map = scan_active_tool_and_map(self.scan_file)
-        tool_name = self.tool_map.get("detected_tool", "Active Editor")
+        profile = self._sync_active_editor_profile()
+        tool_name = profile.get("app_name") or self.tool_map.get("detected_tool") or "Active Editor"
         ctrl_count = self.tool_map.get("uia_control_count", 0)
         if announce:
             self.overlay.status_label.setText(
-                f"Scanned '{tool_name}' ({ctrl_count} UI controls + editor map ready)."
+                f"Active editor: '{tool_name}' ({ctrl_count} UIA controls, dynamic UI map ready)."
             )
         return self.tool_map
 
@@ -121,12 +150,13 @@ class PlushieController:
             self.label_overlay.clear_labels()
             self.overlay.status_label.setText("Sector labels hidden.")
         else:
-            self.run_tool_scan(announce=False)
+            self._sync_active_editor_profile()
             sw, sh = get_screen_size()
-            count = self.label_overlay.show_sectors(sw, sh)
-            tool_name = self.tool_map.get("detected_tool", "Editor")
+            count = self.label_overlay.show_sectors(sw, sh, exclude_rect=self.overlay.geometry())
+            profile = self.editor_profiles.get(self.active_editor_key, {})
+            tool_name = profile.get("app_name") or self.tool_map.get("detected_tool") or "Editor"
             self.overlay.status_label.setText(
-                f"{tool_name}: {count} sectors shown — say 'go to sector 2', 'what is 2', or 'hide labels'."
+                f"{tool_name}: {count} sectors — say 'go to 2', 'zoom 1', 'click', or 'hide'."
             )
 
     def _on_continuous_tick(self) -> None:
@@ -134,7 +164,8 @@ class PlushieController:
             dx, dy = self._cont_dir
             move_mouse_relative(dx * self._cont_speed, dy * self._cont_speed)
         if self._cont_scroll != 0:
-            mouse_scroll(self._cont_scroll)
+            step_units = self._cont_scroll * max(1, self._cont_speed // 4)
+            mouse_scroll(step_units)
 
     def _stop_continuous(self) -> None:
         self._cont_dir = None
@@ -180,7 +211,8 @@ class PlushieController:
         dlg = PackBuilderDialog(self.root_dir, parent=self.overlay)
         dlg.exec()
         self.overlay.engine.profiles = self.overlay.engine._load_profiles()
-        self.overlay.status_label.setText("Command packs reloaded.")
+        self._sync_active_editor_profile()
+        self.overlay.status_label.setText("Command packs & editor profiles reloaded.")
 
     def open_theme_wizard(self) -> None:
         wizard = ThemeWizard(self.root_dir, parent=self.overlay)
@@ -197,46 +229,61 @@ class PlushieController:
     def _on_voice_error(self, err: str) -> None:
         self.overlay.status_label.setText(f"Voice notice: {err}")
 
+    def _lookup_purpose(self, query_text: str) -> Optional[str]:
+        low = query_text.lower().strip()
+        for key, desc in self.active_knowledge_map.items():
+            if key and re.search(rf"\b{re.escape(key)}\b", low):
+                return f"{key.replace('_', ' ').title()}: {desc}"
+        mapped = enrich_with_web_knowledge(low)
+        if mapped.get("matched_topic") and mapped["matched_topic"].lower() != low:
+            return f"{mapped['matched_topic']}: {mapped['purpose']}"
+        return None
+
     def _handle_cursor_utterance(self, utterance: str) -> Optional[dict]:
         text = re.sub(r"\s+", " ", utterance.lower()).strip()
         step = 180 if any(w in text for w in ("far", "big", "lot", "fast")) else 60
 
-        # 0. Rescan active tool & map
-        if any(p in text for p in ("rescan", "scan app", "scan tool", "refresh map")):
+        # 0. Rescan active tool & profile
+        if any(p in text for p in ("rescan", "scan app", "scan tool", "refresh map", "detect editor")):
             info = self.run_tool_scan(announce=False)
+            profile = self.editor_profiles.get(self.active_editor_key, {})
+            tool_name = profile.get("app_name") or info.get("detected_tool", "Editor")
             return {
                 "status": "cursor",
-                "message": f"Rescanned '{info.get('detected_tool', 'Editor')}' ({info.get('uia_control_count', 0)} controls).",
+                "message": f"Detected '{tool_name}' ({info.get('uia_control_count', 0)} UIA controls).",
             }
 
-        # 1. Stop continuous movement / scroll
+        # 1. Stop continuous movement / scroll (consume "stop" so it doesn't accidentally hit spacebar)
         if text in ("stop", "halt", "freeze", "stop moving", "stop scrolling"):
             was_moving = self._cont_dir is not None or self._cont_scroll != 0
             self._stop_continuous()
-            if was_moving:
-                return {"status": "cursor", "message": "Stopped continuous cursor/scroll motion."}
-
-        # 2. Multi-level Sector & Control Navigation
-        if any(p in text for p in ("show labels", "show sectors", "label controls", "show buttons", "sectors")):
-            self.run_tool_scan(announce=False)
-            sw, sh = get_screen_size()
-            count = self.label_overlay.show_sectors(sw, sh)
             return {
                 "status": "cursor",
-                "message": f"{count} sectors shown — say 'go to sector 2', 'what is 2', or 'hide labels'.",
+                "message": "Stopped continuous motion." if was_moving else "Motion already stopped.",
             }
 
-        if any(p in text for p in ("hide labels", "close labels", "hide targets", "clear labels", "hide sectors")):
-            self.label_overlay.clear_labels()
-            return {"status": "cursor", "message": "Labels hidden."}
+        # 2. Multi-level Sector & Control Navigation (Hover-first)
+        if any(p in text for p in ("show labels", "show sectors", "label controls", "show buttons", "sectors")):
+            self._sync_active_editor_profile()
+            sw, sh = get_screen_size()
+            count = self.label_overlay.show_sectors(sw, sh, exclude_rect=self.overlay.geometry())
+            return {
+                "status": "cursor",
+                "message": f"{count} sectors — say 'go to 2', 'zoom 1', 'what is 2', or 'hide'.",
+            }
 
-        if text in ("back sector", "go back", "previous level", "level up") and self.label_overlay.isVisible():
+        if any(p in text for p in ("hide labels", "close labels", "hide targets", "clear labels", "hide sectors", "hide", "cancel labels")):
+            self._stop_continuous()
+            self.label_overlay.clear_labels()
+            return {"status": "cursor", "message": "Overlay hidden."}
+
+        if text in ("back sector", "go back", "previous level", "level up", "back") and self.label_overlay.isVisible():
             prev = self.label_overlay.go_back_level()
             if prev:
-                return {"status": "cursor", "message": f"Returned to {prev}."}
-            return {"status": "cursor", "message": "Exited sector labels."}
+                return {"status": "cursor", "message": f"Back to {prev}."}
+            return {"status": "cursor", "message": "Exited sector overlay."}
 
-        # Ask what a tool/tab/sector/control does even if labels aren't currently shown
+        # Contextual help: what is X / what does X do
         if any(q in text for q in ("what is", "what does", "describe", "purpose", "use of")):
             if self.label_overlay.isVisible():
                 num = self._extract_target_number(text)
@@ -246,10 +293,11 @@ class PlushieController:
                     else self.label_overlay.get_target_by_name(text)
                 )
                 if target is not None:
+                    move_mouse_to_screen(*target.center)
                     return {"status": "cursor", "message": f"#{target.index} {target.name}: {target.purpose}"}
-            mapped = enrich_with_web_knowledge(text)
-            if mapped["matched_topic"] != text:
-                return {"status": "cursor", "message": f"{mapped['matched_topic']}: {mapped['purpose']}"}
+            help_msg = self._lookup_purpose(text)
+            if help_msg:
+                return {"status": "cursor", "message": help_msg}
 
         if self.label_overlay.isVisible():
             num = self._extract_target_number(text)
@@ -263,35 +311,47 @@ class PlushieController:
                 sw, sh = get_screen_size()
                 cx, cy = target.center
 
-                wants_zoom = any(w in text for w in ("sector", "go to", "zoom", "deeper", "inside", "open"))
-                if target.kind == "sector" and ("click" not in text):
-                    sub_count = self.label_overlay.drill_into_target(target, sw, sh)
+                # Explicit sub-zone zoom ("zoom 2" / "deeper 2")
+                if any(w in text for w in ("zoom", "deeper", "subzone")) and "click" not in text:
+                    move_mouse_to_screen(cx, cy)
+                    sub_count = self.label_overlay.drill_into_target(target, sw, sh, force_subzone=True)
                     return {
                         "status": "cursor",
-                        "message": f"Inside '{target.name}' ({sub_count} items) — say a number, 'zoom N', 'what is N', or 'back'.",
-                    }
-                if wants_zoom and ("click" not in text):
-                    sub_count = self.label_overlay.drill_into_target(target, sw, sh)
-                    return {
-                        "status": "cursor",
-                        "message": f"Zoomed into '{target.name}' ({sub_count} sub-zones) — say a number or 'click N'.",
+                        "message": f"Zoomed '{target.name}' ({sub_count} zones) — hover a number or say 'click N'.",
                     }
 
-                move_mouse_to_screen(cx, cy)
+                # Drill into sector unless explicitly asked to click
+                if target.kind == "sector" and ("click" not in text):
+                    move_mouse_to_screen(cx, cy)
+                    sub_count = self.label_overlay.drill_into_target(target, sw, sh)
+                    return {
+                        "status": "cursor",
+                        "message": f"Inside '{target.name}' ({sub_count} items) — say a number to hover, 'zoom N', or 'click N'.",
+                    }
+
+                # Explicit click commands on a numbered/named target
                 if "right click" in text:
+                    move_mouse_to_screen(cx, cy)
                     mouse_click("right")
                     self.label_overlay.clear_labels()
                     return {"status": "cursor", "message": f"Right-clicked {target.name}."}
                 if "double click" in text:
+                    move_mouse_to_screen(cx, cy)
                     mouse_double_click()
                     self.label_overlay.clear_labels()
                     return {"status": "cursor", "message": f"Double-clicked {target.name}."}
-                if "move" in text or "hover" in text or "point" in text:
+                if "click" in text or "tap" in text:
+                    move_mouse_to_screen(cx, cy)
+                    mouse_click("left")
                     self.label_overlay.clear_labels()
-                    return {"status": "cursor", "message": f"Moved cursor to {target.name}."}
-                mouse_click("left")
-                self.label_overlay.clear_labels()
-                return {"status": "cursor", "message": f"Clicked {target.name}."}
+                    return {"status": "cursor", "message": f"Clicked {target.name}."}
+
+                # Default: HOVER-FIRST — move cursor to target and keep overlay visible so user can verify
+                move_mouse_to_screen(cx, cy)
+                return {
+                    "status": "cursor",
+                    "message": f"Hovering #{target.index} {target.name} — say 'click', 'double click', 'zoom {target.index}', or 'back'.",
+                }
 
         # 3. Continuous Directional Hold & Relative Wheel Modes
         if any(p in text for p in ("start moving", "keep moving", "glide", "drift")):
@@ -305,26 +365,34 @@ class PlushieController:
                 self._cont_dir = (0, 1)
             if self._cont_dir is not None:
                 self._cont_timer.start()
-                return {"status": "cursor", "message": "Continuous cursor move started — say 'stop' to halt."}
+                return {"status": "cursor", "message": "Continuous cursor glide started — say 'stop' to halt."}
 
         if any(p in text for p in ("keep scrolling", "start scrolling", "auto scroll")):
             if "up" in text:
-                self._cont_scroll = 90
+                self._cont_scroll = 20
                 self._cont_timer.start()
                 return {"status": "cursor", "message": "Continuous scroll up — say 'stop' to halt."}
             if "down" in text:
-                self._cont_scroll = -90
+                self._cont_scroll = -20
                 self._cont_timer.start()
                 return {"status": "cursor", "message": "Continuous scroll down — say 'stop' to halt."}
 
         if text in ("faster", "move faster", "speed up"):
-            self._cont_speed = min(24, self._cont_speed + 4)
-            return {"status": "cursor", "message": f"Cursor glide speed set to {self._cont_speed}."}
+            self._cont_speed = min(20, self._cont_speed + 3)
+            return {"status": "cursor", "message": f"Motion speed set to {self._cont_speed}."}
         if text in ("slower", "move slower", "slow down"):
-            self._cont_speed = max(2, self._cont_speed - 3)
-            return {"status": "cursor", "message": f"Cursor glide speed set to {self._cont_speed}."}
+            self._cont_speed = max(2, self._cont_speed - 2)
+            return {"status": "cursor", "message": f"Motion speed set to {self._cont_speed}."}
 
-        # 4. Voice-Triggered Keyboard Navigation
+        # 4. High-frequency editing macros from active profile
+        active_profile = self.editor_profiles.get(self.active_editor_key)
+        macro = match_editor_macro(text, active_profile)
+        if macro is not None:
+            label, keys = macro
+            ok, detail = send_key_combo(keys)
+            return {"status": "cursor", "message": f"{label}: {detail}" if ok else detail}
+
+        # 5. Voice-Triggered Keyboard Navigation
         if text in ("shift tab", "back tab", "previous field"):
             ok, detail = send_key_combo(["shift", "tab"])
             return {"status": "cursor", "message": detail if ok else detail}
@@ -350,7 +418,7 @@ class PlushieController:
             ok, detail = send_key_combo(["esc"])
             return {"status": "cursor", "message": detail if ok else detail}
 
-        # 5. Direct single-step cursor / click / scroll controls
+        # 6. Direct single-step cursor / click / scroll controls
         if "double click" in text:
             ok, detail = mouse_double_click()
             return {"status": "cursor", "message": detail if ok else detail}
@@ -368,10 +436,10 @@ class PlushieController:
             return {"status": "cursor", "message": detail if ok else detail}
 
         if "scroll up" in text:
-            ok, detail = mouse_scroll(360 if "fast" in text else 180)
+            ok, detail = mouse_scroll(240 if "fast" in text else 120)
             return {"status": "cursor", "message": detail if ok else detail}
         if "scroll down" in text:
-            ok, detail = mouse_scroll(-360 if "fast" in text else -180)
+            ok, detail = mouse_scroll(-240 if "fast" in text else -120)
             return {"status": "cursor", "message": detail if ok else detail}
 
         if "move left" in text or "go left" in text:
@@ -397,8 +465,8 @@ class PlushieController:
             return cursor_res
 
         engine = self.overlay.engine
-        app_key = engine.settings.get("active_app", "capcut")
-        profile = engine.profiles.get(app_key, {})
+        app_key = self.active_editor_key or engine.settings.get("active_app", "clipchamp")
+        profile = self.editor_profiles.get(app_key) or engine.profiles.get(app_key, {})
 
         if window_ok is None:
             window_ok, _ = check_target_window(profile.get("window_keywords", []))

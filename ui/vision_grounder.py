@@ -103,7 +103,7 @@ class VisionGrounder:
 
     @classmethod
     def _merge_boxes(
-        cls, boxes: List[Tuple[int, int, int, int]], iou_threshold: float = 0.35
+        cls, boxes: List[Tuple[int, int, int, int]], iou_threshold: float = 0.25
     ) -> List[Tuple[int, int, int, int]]:
         merged: List[Tuple[int, int, int, int]] = []
         for box in sorted(boxes, key=lambda r: (r[1], r[0])):
@@ -122,37 +122,40 @@ class VisionGrounder:
         return merged
 
     def detect_panels(self, frame_bgr: np.ndarray, max_panels: int = 8) -> List[DetectedRegion]:
-        """Detect major UI containers/panels dynamically via edges, structural lines, and contours."""
+        """Detect major UI containers/panels dynamically via edges, gradients, and structural lines."""
         h, w = frame_bgr.shape[:2]
         if h < 50 or w < 50:
             return []
 
         gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-        edges = cv2.Canny(blurred, 40, 120)
+        blurred = cv2.GaussianBlur(gray, (3, 3), 0)
 
-        h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(25, w // 12), 1))
-        v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(25, h // 12)))
+        edges_sharp = cv2.Canny(gray, 25, 90)
+        edges_soft = cv2.Canny(blurred, 30, 100)
+        edges = cv2.bitwise_or(edges_sharp, edges_soft)
+
+        h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(24, w // 14), 1))
+        v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(24, h // 14)))
 
         h_lines = cv2.morphologyEx(edges, cv2.MORPH_OPEN, h_kernel)
         v_lines = cv2.morphologyEx(edges, cv2.MORPH_OPEN, v_kernel)
 
         grid_mask = cv2.bitwise_or(edges, cv2.bitwise_or(h_lines, v_lines))
-        close_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
-        closed = cv2.morphologyEx(grid_mask, cv2.MORPH_CLOSE, close_kernel, iterations=2)
+        close_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9))
+        closed = cv2.morphologyEx(grid_mask, cv2.MORPH_CLOSE, close_kernel, iterations=1)
 
         contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        min_area = max(4000, int(w * h * 0.015))
-        max_area = int(w * h * 0.92)
+        min_area = max(2500, int(w * h * 0.012))
+        max_area = int(w * h * 0.94)
 
         raw_boxes: List[Tuple[int, int, int, int]] = []
         for cnt in contours:
             x, y, cw, ch = cv2.boundingRect(cnt)
             area = cw * ch
-            if min_area <= area <= max_area and cw >= 40 and ch >= 35:
+            if min_area <= area <= max_area and cw >= 35 and ch >= 30:
                 raw_boxes.append((x, y, cw, ch))
 
-        panels = self._merge_boxes(raw_boxes, iou_threshold=0.25)
+        panels = self._merge_boxes(raw_boxes, iou_threshold=0.20)
         panels = sorted(panels, key=lambda r: r[2] * r[3], reverse=True)[:max_panels]
         panels = sorted(panels, key=lambda r: (r[1] // max(1, h // 4), r[0]))
 
@@ -208,17 +211,17 @@ class VisionGrounder:
                 pass
 
         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-        edges = cv2.Canny(gray, 50, 140)
+        edges = cv2.Canny(gray, 35, 120)
         dilate_k = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
         dilated = cv2.dilate(edges, dilate_k, iterations=1)
         contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         for cnt in contours:
             rx, ry, rw, rh = cv2.boundingRect(cnt)
-            if 14 <= rw <= max(24, cw // 2) and 14 <= rh <= max(24, ch // 2):
+            if 14 <= rw <= max(28, cw // 2) and 14 <= rh <= max(28, ch // 2):
                 box = (x1 + rx, y1 + ry, rw, rh)
-                if not any(self._iou(box, c[1]) > 0.45 for c in candidates):
-                    candidates.append((f"Control", box, 0.7, ""))
+                if not any(self._iou(box, c[1]) > 0.40 for c in candidates):
+                    candidates.append(("Control", box, 0.7, ""))
 
         candidates.sort(key=lambda c: (c[1][1] // 24, c[1][0]))
         trimmed = candidates[:max_elements]

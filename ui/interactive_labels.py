@@ -1,5 +1,6 @@
 import ctypes
 import json
+import re
 from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
@@ -7,21 +8,23 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from PySide6.QtCore import Qt, QRect
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QApplication, QWidget
+
+from ui.vision_grounder import VisionGrounder
 
 
 VIDEO_EDITOR_UI_MAP: Dict[str, Dict[str, str]] = {
     "header": {
         "title": "Header & Export Bar",
-        "purpose": "Project title, undo/redo, settings, and Share/Export rendering options.",
+        "purpose": "Project title, undo/redo, settings, and export/share options.",
     },
     "left_rail": {
         "title": "Left Tool Rail",
-        "purpose": "Switch between Media, Record & Create, Content Library, Templates, Text, and Transitions.",
+        "purpose": "Switch between media, text, transitions, effects, captions, and templates.",
     },
     "left_drawer": {
         "title": "Asset & Media Drawer",
-        "purpose": "Import video/audio clips, browse templates/text presets, and drag items onto the timeline.",
+        "purpose": "Import video/audio clips, browse presets, and drag items onto the timeline.",
     },
     "preview_transport": {
         "title": "Preview Monitor & Play Controls",
@@ -29,47 +32,11 @@ VIDEO_EDITOR_UI_MAP: Dict[str, Dict[str, str]] = {
     },
     "right_inspector": {
         "title": "Right Property Inspector",
-        "purpose": "Edit selected clip properties: Captions, Audio volume/fade, Filters, Effects, Color, Speed.",
+        "purpose": "Edit selected clip captions, audio, color, speed, effects, or keyframes.",
     },
     "timeline": {
         "title": "Timeline & Multi-Track Editor",
-        "purpose": "Arrange, trim, split, and layer video and audio clips along time, with timeline zoom on the bottom right.",
-    },
-    "import_media": {
-        "title": "Import Media Button",
-        "purpose": "Opens file picker to bring video clips, images, or audio files into your project.",
-    },
-    "text_tool": {
-        "title": "Text Tab",
-        "purpose": "Adds titles, captions, or lower-third text overlays to your video.",
-    },
-    "transitions_tool": {
-        "title": "Transitions Tab",
-        "purpose": "Adds crossfades, wipes, or motion transitions between timeline clips.",
-    },
-    "play_button": {
-        "title": "Play / Pause Button",
-        "purpose": "Starts or pauses real-time preview playback at the current playhead position.",
-    },
-    "captions_panel": {
-        "title": "Captions Inspector",
-        "purpose": "Generates or edits subtitles/captions for speech in the video.",
-    },
-    "audio_panel": {
-        "title": "Audio Inspector",
-        "purpose": "Adjusts clip loudness, mute state, or audio fade-in/fade-out.",
-    },
-    "filters_effects": {
-        "title": "Filters & Effects Inspector",
-        "purpose": "Applies visual color filters, blur/glitch effects, or color adjustments to clips.",
-    },
-    "speed_panel": {
-        "title": "Speed Inspector",
-        "purpose": "Changes playback speed (slow motion or speed-up) and clip duration.",
-    },
-    "export_button": {
-        "title": "Export / Share Button",
-        "purpose": "Renders and exports the final edited video file.",
+        "purpose": "Arrange, trim, split, and layer video and audio clips along time.",
     },
 }
 
@@ -103,36 +70,33 @@ def _get_foreground_window_rect(screen_w: int, screen_h: int) -> QRect:
     return QRect(0, 0, screen_w, screen_h)
 
 
-def _match_editor_purpose(label: str, fallback_key: str) -> str:
-    low = (label or "").lower()
-    for _, info in VIDEO_EDITOR_UI_MAP.items():
-        if info["title"].lower() in low:
-            return info["purpose"]
-    if "export" in low or "share" in low:
-        return VIDEO_EDITOR_UI_MAP["export_button"]["purpose"]
-    if "import" in low or "media" in low:
-        return VIDEO_EDITOR_UI_MAP["import_media"]["purpose"]
-    if "text" in low:
-        return VIDEO_EDITOR_UI_MAP["text_tool"]["purpose"]
-    if "transition" in low:
-        return VIDEO_EDITOR_UI_MAP["transitions_tool"]["purpose"]
-    if "play" in low:
-        return VIDEO_EDITOR_UI_MAP["play_button"]["purpose"]
-    if "caption" in low:
-        return VIDEO_EDITOR_UI_MAP["captions_panel"]["purpose"]
-    if "audio" in low:
-        return VIDEO_EDITOR_UI_MAP["audio_panel"]["purpose"]
-    if "filter" in low or "effect" in low or "color" in low:
-        return VIDEO_EDITOR_UI_MAP["filters_effects"]["purpose"]
-    if "speed" in low:
-        return VIDEO_EDITOR_UI_MAP["speed_panel"]["purpose"]
-    return VIDEO_EDITOR_UI_MAP.get(fallback_key, {}).get(
-        "purpose",
-        f"Interactive control '{label}' inside the active video editor." if label else "Interactive control in the active video editor.",
+def _match_editor_purpose(
+    label: str,
+    fallback_key: str,
+    knowledge_map: Optional[Dict[str, str]] = None,
+) -> str:
+    low = (label or "").strip().lower()
+    active_map: Dict[str, str] = {
+        k: v["purpose"] for k, v in VIDEO_EDITOR_UI_MAP.items()
+    }
+    if knowledge_map:
+        active_map.update({k.lower(): v for k, v in knowledge_map.items() if v})
+
+    if low in active_map:
+        return active_map[low]
+    for key, desc in active_map.items():
+        if key and re.search(rf"\b{re.escape(key)}\b", low):
+            return desc
+    if fallback_key in active_map:
+        return active_map[fallback_key]
+    return (
+        f"Interactive control '{label}' inside the active video editor."
+        if label
+        else "Interactive control in the active video editor."
     )
 
 
-def _build_major_sectors(win: QRect) -> List[InteractiveTarget]:
+def _fallback_sectors(win: QRect, knowledge_map: Optional[Dict[str, str]] = None) -> List[InteractiveTarget]:
     wx, wy, ww, wh = win.left(), win.top(), win.width(), win.height()
     sectors_spec = [
         ("Header & Export", QRect(wx + int(ww * 0.06), wy + 4, int(ww * 0.90), 44), "header"),
@@ -147,14 +111,21 @@ def _build_major_sectors(win: QRect) -> List[InteractiveTarget]:
             index=i,
             name=title,
             rect=rect,
-            purpose=VIDEO_EDITOR_UI_MAP[key]["purpose"],
+            purpose=_match_editor_purpose(title, key, knowledge_map),
             kind="sector",
         )
         for i, (title, rect, key) in enumerate(sectors_spec, start=1)
     ]
 
 
-def _load_scanned_controls_in_rect(scan_file: Optional[Path], region: QRect, screen_w: int, screen_h: int, max_items: int = 18) -> List[InteractiveTarget]:
+def _load_scanned_controls_in_rect(
+    scan_file: Optional[Path],
+    region: QRect,
+    screen_w: int,
+    screen_h: int,
+    knowledge_map: Optional[Dict[str, str]] = None,
+    max_items: int = 18,
+) -> List[InteractiveTarget]:
     if scan_file is None or not scan_file.exists():
         return []
     try:
@@ -188,7 +159,7 @@ def _load_scanned_controls_in_rect(scan_file: Optional[Path], region: QRect, scr
         ):
             continue
         name = (item.get("name") or "").strip() or f"Control {len(targets) + 1}"
-        purpose = (item.get("purpose") or "").strip() or _match_editor_purpose(name, "preview_transport")
+        purpose = (item.get("purpose") or "").strip() or _match_editor_purpose(name, "preview_transport", knowledge_map)
         targets.append(
             InteractiveTarget(
                 index=len(targets) + 1,
@@ -201,103 +172,19 @@ def _load_scanned_controls_in_rect(scan_file: Optional[Path], region: QRect, scr
     return targets
 
 
-def _build_detailed_sector_targets(sector: InteractiveTarget) -> List[InteractiveTarget]:
-    """Break a chosen sector into detailed sub-controls/slots for a clean sector view."""
-    r = sector.rect
-    x, y, w, h = r.left(), r.top(), r.width(), r.height()
-    items: List[Tuple[str, QRect, str]] = []
-
-    if sector.name == "Header & Export":
-        items = [
-            ("Project Menu", QRect(x, y, max(60, w // 4), h), VIDEO_EDITOR_UI_MAP["header"]["purpose"]),
-            ("Undo / Redo", QRect(x + w // 4, y, max(60, w // 4), h), "Undo or redo recent timeline edits."),
-            ("Workspace / Zoom", QRect(x + w // 2, y, max(60, w // 4), h), "Adjust view or account options."),
-            ("Share / Export", QRect(x + (3 * w) // 4, y, max(60, w // 4), h), VIDEO_EDITOR_UI_MAP["export_button"]["purpose"]),
-        ]
-    elif sector.name == "Left Tool Rail":
-        names_keys = [
-            ("Media", "import_media"),
-            ("Record", "left_rail"),
-            ("Library", "left_rail"),
-            ("Templates", "left_rail"),
-            ("Text", "text_tool"),
-            ("Transitions", "transitions_tool"),
-        ]
-        step_h = max(24, h // len(names_keys))
-        for i, (nm, k) in enumerate(names_keys):
-            items.append((nm, QRect(x, y + i * step_h, w, step_h - 2), VIDEO_EDITOR_UI_MAP[k]["purpose"]))
-    elif sector.name == "Media Drawer":
-        items = [
-            ("Import Media", QRect(x + 8, y + 8, max(80, w - 16), 44), VIDEO_EDITOR_UI_MAP["import_media"]["purpose"]),
-            ("Asset Library Grid", QRect(x + 8, y + 60, max(80, w - 16), max(60, h - 72)), VIDEO_EDITOR_UI_MAP["left_drawer"]["purpose"]),
-        ]
-    elif sector.name == "Preview & Play":
-        play_h = max(36, int(h * 0.14))
-        items = [
-            ("Video Canvas", QRect(x + 8, y + 8, max(80, w - 16), max(60, h - play_h - 16)), VIDEO_EDITOR_UI_MAP["preview_transport"]["purpose"]),
-            ("Play / Transport", QRect(x + int(w * 0.25), y + h - play_h, max(80, int(w * 0.50)), play_h), VIDEO_EDITOR_UI_MAP["play_button"]["purpose"]),
-        ]
-    elif sector.name == "Right Inspector":
-        panels = [
-            ("Captions", "captions_panel"),
-            ("Audio", "audio_panel"),
-            ("Fade", "audio_panel"),
-            ("Filters", "filters_effects"),
-            ("Effects", "filters_effects"),
-            ("Color", "filters_effects"),
-            ("Speed", "speed_panel"),
-        ]
-        step_h = max(24, h // len(panels))
-        for i, (nm, k) in enumerate(panels):
-            items.append((nm, QRect(x, y + i * step_h, w, step_h - 2), VIDEO_EDITOR_UI_MAP[k]["purpose"]))
-    else:
-        top_h = max(28, int(h * 0.25))
-        mid_h = max(32, int(h * 0.42))
-        bot_h = max(24, h - top_h - mid_h)
-        items = [
-            ("Time Ruler / Playhead", QRect(x + 8, y + 4, max(80, w - 16), top_h), "Scrub or position the timeline playhead."),
-            ("Video Track", QRect(x + 8, y + top_h + 6, max(80, w - 16), mid_h), "Select, trim, or split video clips on the timeline."),
-            ("Audio & Zoom Bar", QRect(x + 8, y + top_h + mid_h + 8, max(80, w - 16), bot_h), "Manage audio tracks and timeline zoom level."),
-        ]
-
-    return [
-        InteractiveTarget(index=i, name=nm, rect=qrect, purpose=purp, kind="control")
-        for i, (nm, qrect, purp) in enumerate(items, start=1)
-    ]
-
-
-def _subdivide_target_level(target: InteractiveTarget) -> List[InteractiveTarget]:
-    """Subdivide a selected target into a 2x2 finer sub-level for deeper precision."""
-    r = target.rect
-    hw = max(16, r.width() // 2)
-    hh = max(16, r.height() // 2)
-    quads = [
-        ("Top-Left", QRect(r.left(), r.top(), hw, hh)),
-        ("Top-Right", QRect(r.left() + hw, r.top(), r.width() - hw, hh)),
-        ("Bottom-Left", QRect(r.left(), r.top() + hh, hw, r.height() - hh)),
-        ("Bottom-Right", QRect(r.left() + hw, r.top() + hh, r.width() - hw, r.height() - hh)),
-    ]
-    return [
-        InteractiveTarget(
-            index=i,
-            name=f"{target.name} ({qname})",
-            rect=qrect,
-            purpose=f"{qname} sub-area of {target.name}: {target.purpose}",
-            kind="subzone",
-        )
-        for i, (qname, qrect) in enumerate(quads, start=1)
-    ]
-
-
 class InteractiveLabelOverlay(QWidget):
-    """Multi-level sector & control badge overlay backed by startup tool scan + knowledge map."""
+    """Multi-level sector & control badge overlay using dynamic OpenCV segmentation + scoped grounding."""
 
     def __init__(self, scan_file: Optional[Path] = None):
         super().__init__(None)
         self.scan_file = scan_file
+        self.grounder = VisionGrounder()
+        self.knowledge_map: Dict[str, str] = {}
         self._targets: List[InteractiveTarget] = []
         self._history: List[Tuple[str, List[InteractiveTarget]]] = []
         self._level_name: str = "sectors"
+        self._last_frame = None
+        self._last_win_rect: Optional[QRect] = None
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
@@ -313,10 +200,56 @@ class InteractiveLabelOverlay(QWidget):
     def level_name(self) -> str:
         return self._level_name
 
-    def show_sectors(self, screen_w: int, screen_h: int) -> int:
+    def set_knowledge_map(self, knowledge_map: Dict[str, str]) -> None:
+        self.knowledge_map = dict(knowledge_map or {})
+
+    def _capture_clean_window(self, win: QRect, exclude_rect: Optional[QRect] = None):
+        was_visible = self.isVisible()
+        if was_visible:
+            self.hide()
+            app_inst = QApplication.instance()
+            if app_inst is not None:
+                app_inst.processEvents()
+        try:
+            excl_tuple = (
+                (exclude_rect.left(), exclude_rect.top(), exclude_rect.width(), exclude_rect.height())
+                if exclude_rect is not None and exclude_rect.isValid()
+                else None
+            )
+            frame = self.grounder.capture_window_region(
+                win.left(), win.top(), win.width(), win.height(), exclude_rect=excl_tuple
+            )
+        finally:
+            if was_visible:
+                self.show()
+                self.raise_()
+                self.update()
+        return frame
+
+    def show_sectors(self, screen_w: int, screen_h: int, exclude_rect: Optional[QRect] = None) -> int:
         self._history.clear()
         win = _get_foreground_window_rect(screen_w, screen_h)
-        self._targets = _build_major_sectors(win)
+        self._last_win_rect = win
+        frame = self._capture_clean_window(win, exclude_rect=exclude_rect)
+        self._last_frame = frame
+
+        detected_targets: List[InteractiveTarget] = []
+        if frame is not None:
+            panels = self.grounder.detect_panels(frame, max_panels=8)
+            for p in panels:
+                px, py, pw, ph = p.bbox
+                qrect = QRect(win.left() + px, win.top() + py, pw, ph)
+                detected_targets.append(
+                    InteractiveTarget(
+                        index=p.index,
+                        name=p.label,
+                        rect=qrect,
+                        purpose=_match_editor_purpose(p.label, "timeline", self.knowledge_map),
+                        kind="sector",
+                    )
+                )
+
+        self._targets = detected_targets if detected_targets else _fallback_sectors(win, self.knowledge_map)
         self._level_name = "sectors"
         self.setGeometry(0, 0, screen_w, screen_h)
         if self._targets:
@@ -325,15 +258,86 @@ class InteractiveLabelOverlay(QWidget):
             self.update()
         return len(self._targets)
 
-    def drill_into_target(self, target: InteractiveTarget, screen_w: int, screen_h: int) -> int:
+    def drill_into_target(
+        self,
+        target: InteractiveTarget,
+        screen_w: int,
+        screen_h: int,
+        force_subzone: bool = False,
+    ) -> int:
         self._history.append((self._level_name, list(self._targets)))
-        if target.kind == "sector":
-            scanned_hits = _load_scanned_controls_in_rect(self.scan_file, target.rect, screen_w, screen_h, max_items=18)
-            detail_targets = scanned_hits if len(scanned_hits) >= 2 else _build_detailed_sector_targets(target)
+
+        if target.kind == "sector" and not force_subzone:
+            win = self._last_win_rect or _get_foreground_window_rect(screen_w, screen_h)
+            frame = self._last_frame if self._last_frame is not None else self._capture_clean_window(win)
+            detail_targets: List[InteractiveTarget] = []
+
+            if frame is not None:
+                rel_bbox = (
+                    max(0, target.rect.left() - win.left()),
+                    max(0, target.rect.top() - win.top()),
+                    target.rect.width(),
+                    target.rect.height(),
+                )
+                elems = self.grounder.detect_sector_elements(
+                    frame,
+                    rel_bbox,
+                    knowledge_map=self.knowledge_map,
+                    max_elements=18,
+                )
+                for el in elems:
+                    ex, ey, ew, eh = el.bbox
+                    qrect = QRect(win.left() + ex, win.top() + ey, ew, eh)
+                    purpose = el.description or _match_editor_purpose(el.label, "preview_transport", self.knowledge_map)
+                    detail_targets.append(
+                        InteractiveTarget(
+                            index=el.index,
+                            name=el.label,
+                            rect=qrect,
+                            purpose=purpose,
+                            kind="control",
+                        )
+                    )
+
+            if len(detail_targets) < 2:
+                scanned_hits = _load_scanned_controls_in_rect(
+                    self.scan_file, target.rect, screen_w, screen_h, self.knowledge_map, max_items=18
+                )
+                if len(scanned_hits) >= 2:
+                    detail_targets = scanned_hits
+
+            if not detail_targets:
+                subzones = self.grounder.subdivide_box(
+                    (target.rect.left(), target.rect.top(), target.rect.width(), target.rect.height()),
+                    rows=2,
+                    cols=2,
+                )
+                detail_targets = [
+                    InteractiveTarget(
+                        index=sz.index,
+                        name=sz.label,
+                        rect=QRect(sz.bbox[0], sz.bbox[1], sz.bbox[2], sz.bbox[3]),
+                        purpose=target.purpose,
+                        kind="subzone",
+                    )
+                    for sz in subzones
+                ]
+
             self._targets = detail_targets
             self._level_name = f"sector:{target.name}"
         else:
-            self._targets = _subdivide_target_level(target)
+            r = target.rect
+            subzones = self.grounder.subdivide_box((r.left(), r.top(), r.width(), r.height()), rows=2, cols=2)
+            self._targets = [
+                InteractiveTarget(
+                    index=sz.index,
+                    name=f"{target.name} [{sz.label}]",
+                    rect=QRect(sz.bbox[0], sz.bbox[1], sz.bbox[2], sz.bbox[3]),
+                    purpose=target.purpose,
+                    kind="subzone",
+                )
+                for sz in subzones
+            ]
             self._level_name = f"zoom:{target.name}"
 
         self.setGeometry(0, 0, screen_w, screen_h)
@@ -360,6 +364,7 @@ class InteractiveLabelOverlay(QWidget):
         self._history.clear()
         self._targets = []
         self._level_name = "sectors"
+        self._last_frame = None
         self.hide()
 
     def get_target_by_number(self, num: int) -> Optional[InteractiveTarget]:
