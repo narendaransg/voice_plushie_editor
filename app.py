@@ -3,7 +3,7 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication, QPushButton, QMessageBox, QHBoxLayout, QComboBox
@@ -49,7 +49,7 @@ WORD_NUMBERS = {
 
 
 class PlushieController:
-    """Connects overlay, dynamic editor profiles, bidirectional levels, hover-first mover, drag/timeline edits, and voice."""
+    """Connects overlay, dynamic editor profiles, sectors->groups->spots traversal, interactive drag-and-drop, and voice."""
 
     def __init__(self, root_dir: Path, enable_voice: bool = True):
         self.root_dir = Path(root_dir)
@@ -65,6 +65,7 @@ class PlushieController:
         self.label_overlay = InteractiveLabelOverlay(scan_file=self.scan_file)
         self.label_overlay.set_knowledge_map(self.active_knowledge_map)
 
+        self._is_dragging: bool = False
         self._cont_dir: Optional[Tuple[int, int]] = None
         self._cont_scroll: int = 0
         self._cont_speed: int = 6
@@ -148,6 +149,7 @@ class PlushieController:
 
     def toggle_interactive_labels(self) -> None:
         if self.label_overlay.isVisible():
+            self._release_drag_if_active()
             self.label_overlay.clear_labels()
             self.overlay.status_label.setText("Sector labels hidden.")
         else:
@@ -157,7 +159,7 @@ class PlushieController:
             profile = self.editor_profiles.get(self.active_editor_key, {})
             tool_name = profile.get("app_name") or self.tool_map.get("detected_tool") or "Editor"
             self.overlay.status_label.setText(
-                f"{tool_name}: {count} sectors — say '2' to hover/drill, 'go up'/'back', or 'hide'."
+                f"{tool_name}: {count} dynamic sectors — say a number to open sub-groups, 'drag it', or 'hide'."
             )
 
     def _on_continuous_tick(self) -> None:
@@ -174,6 +176,13 @@ class PlushieController:
         if self._cont_timer.isActive():
             self._cont_timer.stop()
 
+    def _release_drag_if_active(self) -> bool:
+        if self._is_dragging:
+            mouse_up("left")
+            self._is_dragging = False
+            return True
+        return False
+
     def _extract_target_number(self, text: str) -> Optional[int]:
         m = re.search(r"\b(\d{1,2})\b", text)
         if m:
@@ -183,20 +192,6 @@ class PlushieController:
         for phrase, val in sorted(WORD_NUMBERS.items(), key=lambda kv: -len(kv[0])):
             if re.search(rf"\b{re.escape(phrase)}\b", cleaned):
                 return val
-        return None
-
-    def _extract_two_numbers(self, text: str) -> Optional[Tuple[int, int]]:
-        nums: List[int] = []
-        for m in re.finditer(r"\b(\d{1,2})\b", text):
-            nums.append(int(m.group(1)))
-        if len(nums) < 2:
-            cleaned = re.sub(r"[^a-z\s]", " ", text)
-            cleaned = re.sub(r"\s+", " ", cleaned).strip()
-            for phrase, val in sorted(WORD_NUMBERS.items(), key=lambda kv: -len(kv[0])):
-                if re.search(rf"\b{re.escape(phrase)}\b", cleaned) and val not in nums:
-                    nums.append(val)
-        if len(nums) >= 2:
-            return nums[0], nums[1]
         return None
 
     def _refresh_theme_combo(self) -> None:
@@ -254,23 +249,25 @@ class PlushieController:
             return f"{mapped['matched_topic']}: {mapped['purpose']}"
         return None
 
-    def _perform_drag(self, start_xy: Optional[Tuple[int, int]], end_xy: Tuple[int, int], label: str) -> str:
+    def _begin_drag_and_show_destinations(self, start_xy: Optional[Tuple[int, int]], label: str) -> dict:
         if start_xy is not None:
             move_mouse_to_screen(*start_xy)
-            time.sleep(0.04)
+            time.sleep(0.05)
         mouse_down("left")
         time.sleep(0.05)
-        move_mouse_to_screen(*end_xy)
-        time.sleep(0.05)
-        mouse_up("left")
-        self.label_overlay.clear_labels()
-        return f"Dragged {label}."
+        self._is_dragging = True
+        sw, sh = get_screen_size()
+        dest_count = self.label_overlay.show_drop_targets(sw, sh)
+        return {
+            "status": "cursor",
+            "message": f"Holding {label} ({dest_count} drop spots) — say a number (e.g. '1' or 'timeline'), adjust with 'hover left/right', then 'drop'.",
+        }
 
     def _handle_cursor_utterance(self, utterance: str) -> Optional[dict]:
         text = re.sub(r"\s+", " ", utterance.lower()).strip()
-        fine_step = 35 if any(w in text for w in ("tiny", "fine", "little", "bit", "slow")) else 85
+        fine_step = 14 if any(w in text for w in ("tiny", "micro", "pixel")) else 45
         if any(w in text for w in ("far", "big", "lot", "fast")):
-            fine_step = 180
+            fine_step = 150
 
         # 0. Rescan active tool & profile
         if any(p in text for p in ("rescan", "scan app", "scan tool", "refresh map", "detect editor")):
@@ -291,46 +288,53 @@ class PlushieController:
                 "message": "Stopped continuous motion." if was_moving else "Motion already stopped.",
             }
 
-        # 2. Show / Hide / Step Up & Down Levels (sectors <-> zones <-> groups)
+        # 2. Drop / Paste / Release held item at current fine-tuned spot
+        if any(k in text for k in ("drop", "paste", "place", "release", "mouse up", "drag end", "let go")):
+            was_dragging = self._release_drag_if_active()
+            if not was_dragging:
+                mouse_up("left")
+            self.label_overlay.clear_labels()
+            return {
+                "status": "cursor",
+                "message": "Placed item and released drag." if was_dragging else "Released mouse button.",
+            }
+
+        # 3. Show / Hide / Step Up & Down Levels
         if any(p in text for p in ("show labels", "show sectors", "label controls", "show buttons", "sectors")):
             self._sync_active_editor_profile()
             sw, sh = get_screen_size()
             count = self.label_overlay.show_sectors(sw, sh, exclude_rect=self.overlay.geometry())
             return {
                 "status": "cursor",
-                "message": f"Level 'sectors' ({count}) — say a number to hover/drill, 'go up'/'back', or 'hide'.",
+                "message": f"{count} sectors detected — say a number for sub-groups, 'go up', or 'hide'.",
             }
 
         if any(p in text for p in ("hide labels", "close labels", "hide targets", "clear labels", "hide sectors", "hide", "cancel labels")):
             self._stop_continuous()
+            self._release_drag_if_active()
             self.label_overlay.clear_labels()
             return {"status": "cursor", "message": "Overlay hidden."}
 
         if any(p in text for p in ("go up", "level up", "back sector", "go back", "previous level", "back")) and self.label_overlay.isVisible():
             prev = self.label_overlay.go_back_level()
             if prev:
-                return {"status": "cursor", "message": f"Moved up to level '{prev}'."}
+                return {"status": "cursor", "message": f"Moved up to '{prev}'."}
             return {"status": "cursor", "message": "Exited overlay."}
 
-        # Drag target A to target B ("drag 2 to 6") or drag current/target to timeline
-        if "drag" in text and "to" in text and self.label_overlay.isVisible():
-            pair = self._extract_two_numbers(text)
-            if pair is not None:
-                src = self.label_overlay.get_target_by_number(pair[0])
-                dst = self.label_overlay.get_target_by_number(pair[1])
-                if src is not None and dst is not None:
-                    msg = self._perform_drag(src.center, dst.center, f"#{src.index} {src.name} -> #{dst.index} {dst.name}")
-                    return {"status": "cursor", "message": msg}
-
-        if "drag" in text and "timeline" in text:
-            sw, sh = get_screen_size()
-            trect = self.label_overlay.get_timeline_rect(sw, sh)
-            num = self._extract_target_number(text) if self.label_overlay.isVisible() else None
-            src = self.label_overlay.get_target_by_number(num) if num is not None else None
-            start_xy = src.center if src is not None else None
-            end_xy = (trect.center().x(), trect.center().y())
-            msg = self._perform_drag(start_xy, end_xy, "selection to timeline")
-            return {"status": "cursor", "message": msg}
+        # 4. Initiate drag on current cursor or numbered target -> shows drop destinations
+        if any(k in text for k in ("drag it", "drag this", "grab it", "grab this", "pick up")) or (
+            ("drag" in text or "grab" in text) and "to" not in text
+        ):
+            if self.label_overlay.isVisible():
+                num = self._extract_target_number(text)
+                target = (
+                    self.label_overlay.get_target_by_number(num)
+                    if num is not None
+                    else self.label_overlay.get_target_by_name(text)
+                )
+                if target is not None:
+                    return self._begin_drag_and_show_destinations(target.center, f"#{target.index} {target.name}")
+            return self._begin_drag_and_show_destinations(None, "item at cursor")
 
         # Contextual help: what is X / what does X do
         if any(q in text for q in ("what is", "what does", "describe", "purpose", "use of")):
@@ -348,6 +352,7 @@ class PlushieController:
             if help_msg:
                 return {"status": "cursor", "message": help_msg}
 
+        # 5. Navigate active overlay targets (sectors -> sub-groups -> spots, or drop targets while dragging)
         if self.label_overlay.isVisible():
             num = self._extract_target_number(text)
             target = (
@@ -360,7 +365,14 @@ class PlushieController:
                 sw, sh = get_screen_size()
                 cx, cy = target.center
 
-                # Explicit click commands
+                # While holding a dragged clip, move it to the chosen drop spot WITHOUT releasing yet
+                if self._is_dragging or target.kind == "drop_target":
+                    move_mouse_to_screen(cx, cy)
+                    return {
+                        "status": "cursor",
+                        "message": f"Moved clip over '{target.name}' — fine-tune with 'hover left/right' or say 'drop' to place.",
+                    }
+
                 if "right click" in text:
                     move_mouse_to_screen(cx, cy)
                     mouse_click("right")
@@ -377,7 +389,7 @@ class PlushieController:
                     self.label_overlay.clear_labels()
                     return {"status": "cursor", "message": f"Clicked {target.name}."}
 
-                # Hover first + drill down a level when picking a number or saying 'go down'/'drill down'/'zoom'/'go to'
+                # Hover first + drill into sub-groups / finer spots
                 move_mouse_to_screen(cx, cy)
                 wants_drill = any(w in text for w in ("go down", "drill down", "zoom", "deeper", "go to", "open", "inside"))
                 if num is not None or wants_drill:
@@ -385,15 +397,14 @@ class PlushieController:
                     lvl = self.label_overlay.level_name
                     return {
                         "status": "cursor",
-                        "message": f"Hovering #{target.index} {target.name} -> level '{lvl}' ({sub_count}) — say a number, 'go up', or 'click'.",
+                        "message": f"Hovering #{target.index} {target.name} -> '{lvl}' ({sub_count}) — pick a number, 'drag it', 'click', or 'go up'.",
                     }
 
                 return {
                     "status": "cursor",
-                    "message": f"Hovering #{target.index} {target.name} — say 'click', 'go down', 'go up', or 'hide'.",
+                    "message": f"Hovering #{target.index} {target.name} — say 'drag it', 'click', 'go down', or 'go up'.",
                 }
 
-            # Drill down current level even without a specific target number
             if any(w in text for w in ("go down", "drill down", "deeper")) and self.label_overlay._targets:
                 sw, sh = get_screen_size()
                 first = self.label_overlay._targets[0]
@@ -401,18 +412,20 @@ class PlushieController:
                 sub_count = self.label_overlay.drill_into_target(first, sw, sh)
                 return {
                     "status": "cursor",
-                    "message": f"Drilled to level '{self.label_overlay.level_name}' ({sub_count}) — say 'go up' to return.",
+                    "message": f"Drilled down to '{self.label_overlay.level_name}' ({sub_count}) — say 'go up' to return.",
                 }
 
-        # 3. Timeline hover left / right & fine horizontal nudging
-        if any(p in text for p in ("hover left", "nudge left", "scrub left")):
+        # 6. Fine horizontal hover / timeline positioning (works both normally and while holding a dragged clip)
+        if any(p in text for p in ("hover left", "nudge left", "scrub left", "tiny left")):
             ok, detail = move_mouse_relative(-fine_step, 0)
-            return {"status": "cursor", "message": f"Timeline hover left ({fine_step}px): {detail}" if ok else detail}
-        if any(p in text for p in ("hover right", "nudge right", "scrub right")):
+            suffix = " — say 'drop' to place." if self._is_dragging else ""
+            return {"status": "cursor", "message": f"Moved left ({fine_step}px): {detail}{suffix}" if ok else detail}
+        if any(p in text for p in ("hover right", "nudge right", "scrub right", "tiny right")):
             ok, detail = move_mouse_relative(fine_step, 0)
-            return {"status": "cursor", "message": f"Timeline hover right ({fine_step}px): {detail}" if ok else detail}
+            suffix = " — say 'drop' to place." if self._is_dragging else ""
+            return {"status": "cursor", "message": f"Moved right ({fine_step}px): {detail}{suffix}" if ok else detail}
 
-        # 4. Continuous Directional Hold & Relative Wheel Modes
+        # 7. Continuous Directional Hold & Relative Wheel Modes
         if any(p in text for p in ("start moving", "keep moving", "glide", "drift")):
             if "left" in text:
                 self._cont_dir = (-1, 0)
@@ -443,7 +456,7 @@ class PlushieController:
             self._cont_speed = max(2, self._cont_speed - 2)
             return {"status": "cursor", "message": f"Motion speed set to {self._cont_speed}."}
 
-        # 5. High-frequency editing macros from active profile
+        # 8. High-frequency editing macros from active profile
         active_profile = self.editor_profiles.get(self.active_editor_key)
         macro = match_editor_macro(text, active_profile)
         if macro is not None:
@@ -451,7 +464,7 @@ class PlushieController:
             ok, detail = send_key_combo(keys)
             return {"status": "cursor", "message": f"{label}: {detail}" if ok else detail}
 
-        # 6. Voice-Triggered Keyboard Navigation
+        # 9. Voice-Triggered Keyboard Navigation
         if text in ("shift tab", "back tab", "previous field"):
             ok, detail = send_key_combo(["shift", "tab"])
             return {"status": "cursor", "message": detail if ok else detail}
@@ -474,10 +487,11 @@ class PlushieController:
             ok, detail = send_key_combo(["enter"])
             return {"status": "cursor", "message": detail if ok else detail}
         if text in ("press escape", "escape", "esc"):
+            self._release_drag_if_active()
             ok, detail = send_key_combo(["esc"])
             return {"status": "cursor", "message": detail if ok else detail}
 
-        # 7. Direct single-step cursor / click / drag / scroll controls
+        # 10. Direct single-step cursor / click / scroll controls
         if "double click" in text:
             ok, detail = mouse_double_click()
             return {"status": "cursor", "message": detail if ok else detail}
@@ -486,10 +500,9 @@ class PlushieController:
             return {"status": "cursor", "message": detail if ok else detail}
         if any(k in text for k in ("start drag", "hold click", "mouse down", "drag start")):
             ok, detail = mouse_down("left")
-            return {"status": "cursor", "message": detail if ok else detail}
-        if any(k in text for k in ("drop", "release", "mouse up", "drag end", "let go")):
-            ok, detail = mouse_up("left")
-            return {"status": "cursor", "message": detail if ok else detail}
+            if ok:
+                self._is_dragging = True
+            return {"status": "cursor", "message": detail}
         if text in ("click", "left click", "tap"):
             ok, detail = mouse_click("left")
             return {"status": "cursor", "message": detail if ok else detail}
@@ -572,6 +585,7 @@ class PlushieController:
 
     def shutdown(self) -> None:
         self._stop_continuous()
+        self._release_drag_if_active()
         self.label_overlay.clear_labels()
         if self.voice_worker is not None:
             self.voice_worker.stop()
