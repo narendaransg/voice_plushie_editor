@@ -21,8 +21,10 @@ except ImportError:  # pragma: no cover
 class DetectedRegion:
     index: int
     label: str
-    bbox: Tuple[int, int, int, int]  # (x, y, w, h) in window-relative pixels
+    bbox: Tuple[int, int, int, int]  # (x, y, w, h) in physical capture pixels
     kind: str = "panel"  # "panel" | "element" | "subzone"
+    role: str = "Panel"  # "Button" | "Slider" | "Timeline" | "Zoomable" | "Panel"
+    can_zoom: bool = False
     confidence: float = 1.0
     description: str = ""
     meta: Dict[str, Any] = field(default_factory=dict)
@@ -34,7 +36,7 @@ class DetectedRegion:
 
 
 class VisionGrounder:
-    """Recursive UI panel/group & scoped sub-region grounder (MS Office KeyTip style)."""
+    """GUI-agnostic visual segmenter and interactable classifier (Button, Slider, Timeline, Zoomable, Panel)."""
 
     def __init__(self) -> None:
         self._ocr: Optional[Any] = None
@@ -58,7 +60,6 @@ class VisionGrounder:
         height: int,
         exclude_rect: Optional[Tuple[int, int, int, int]] = None,
     ) -> Optional[np.ndarray]:
-        """Capture a screen region as a BGR numpy array and optionally mask an overlay rect."""
         if width <= 20 or height <= 20 or mss is None:
             return None
 
@@ -83,7 +84,8 @@ class VisionGrounder:
             rel_x2 = min(width, ex_x + ex_w - left)
             rel_y2 = min(height, ex_y + ex_h - top)
             if rel_x2 > rel_x1 and rel_y2 > rel_y1:
-                cv2.rectangle(bgr, (rel_x1, rel_y1), (rel_x2, rel_y2), (25, 25, 32), -1)
+                median_color = np.median(bgr.reshape(-1, 3), axis=0).astype(np.uint8).tolist()
+                cv2.rectangle(bgr, (rel_x1, rel_y1), (rel_x2, rel_y2), median_color, -1)
 
         return bgr
 
@@ -101,21 +103,9 @@ class VisionGrounder:
         union = float(aw * ah + bw * bh - inter)
         return inter / union if union > 0 else 0.0
 
-    @staticmethod
-    def _contains(outer: Tuple[int, int, int, int], inner: Tuple[int, int, int, int], pad: int = 6) -> bool:
-        ox, oy, ow, oh = outer
-        ix, iy, iw, ih = inner
-        return (
-            ix >= ox - pad
-            and iy >= oy - pad
-            and (ix + iw) <= (ox + ow + pad)
-            and (iy + ih) <= (oy + oh + pad)
-            and (iw * ih) < (ow * oh * 0.88)
-        )
-
     @classmethod
     def _dedupe_boxes(
-        cls, boxes: List[Tuple[int, int, int, int]], iou_threshold: float = 0.45
+        cls, boxes: List[Tuple[int, int, int, int]], iou_threshold: float = 0.42
     ) -> List[Tuple[int, int, int, int]]:
         kept: List[Tuple[int, int, int, int]] = []
         for box in sorted(boxes, key=lambda r: r[2] * r[3], reverse=True):
@@ -124,55 +114,133 @@ class VisionGrounder:
             kept.append(box)
         return kept
 
+    @staticmethod
+    def classify_region(
+        frame_bgr: np.ndarray,
+        bbox: Tuple[int, int, int, int],
+        is_top_level: bool = False,
+    ) -> Tuple[str, bool, str]:
+        """Infer interactable role ('Button', 'Slider', 'Timeline', 'Zoomable', 'Panel'), zoomability, and hint."""
+        x, y, w, h = bbox
+        fh, fw = frame_bgr.shape[:2]
+        x1 = max(0, x)
+        y1 = max(0, y)
+        x2 = min(fw, x + w)
+        y2 = min(fh, y + h)
+
+        aspect_wh = w / max(1.0, float(h))
+        aspect_hw = h / max(1.0, float(w))
+        area_ratio = (w * h) / max(1.0, float(fw * fh))
+
+        edge_density = 0.0
+        if x2 > x1 + 4 and y2 > y1 + 4:
+            sub_gray = cv2.cvtColor(frame_bgr[y1:y2, x1:x2], cv2.COLOR_BGR2GRAY)
+            sub_edges = cv2.Canny(sub_gray, 40, 120)
+            edge_density = float(np.mean(sub_edges > 0))
+
+        # Horizontal or vertical slider/scrubber track
+        if (aspect_wh >= 4.5 and h <= max(38, int(fh * 0.045)) and w >= 48) or (
+            aspect_hw >= 4.5 and w <= max(38, int(fw * 0.045)) and h >= 48
+        ):
+            return (
+                "Slider",
+                False,
+                "Slider/scrubber track — hover and use 'hover left/right', 'nudge', or 'drag' to adjust.",
+            )
+
+        # Wide multi-track / timeline / dense region suitable for zooming
+        if w >= int(fw * 0.35) and h >= max(65, int(fh * 0.10)) and (aspect_wh >= 2.2 or edge_density >= 0.04):
+            return (
+                "Timeline",
+                True,
+                "Wide timeline/track region — drill down or say 'zoom' for fine horizontal scrubbing and clip placement.",
+            )
+
+        # Compact / card / pill control -> Button
+        if not is_top_level and area_ratio < 0.08 and 0.22 <= aspect_wh <= 6.0 and w >= 16 and h >= 14:
+            can_zoom = (w >= 90 and h >= 55) or edge_density >= 0.08
+            hint = "Button/control — hover to inspect or say 'click' to activate."
+            if can_zoom:
+                hint += " Say 'zoom' if you need finer sub-spots."
+            return ("Button", can_zoom, hint)
+
+        # Larger container or top-level sector
+        can_zoom = (w * h) >= max(4000, int(fw * fh * 0.03))
+        role = "Panel" if is_top_level or area_ratio >= 0.06 else "Zoomable"
+        hint = (
+            "Container group — drill down to inspect controls inside, or say 'zoom' for sub-zones."
+            if can_zoom
+            else "Interactive region — hover, drill down, or say 'click'."
+        )
+        return (role, can_zoom, hint)
+
     def detect_panels(self, frame_bgr: np.ndarray, max_panels: int = 8) -> List[DetectedRegion]:
-        """Detect distinct UI containers/groups without slicing across full-screen lines."""
+        """Dynamically segment distinct UI containers/regions on any foreground GUI."""
         h, w = frame_bgr.shape[:2]
-        if h < 50 or w < 50:
+        if h < 60 or w < 60:
             return []
 
+        scale = 0.25
+        small = cv2.resize(
+            frame_bgr, (max(40, int(w * scale)), max(40, int(h * scale))), interpolation=cv2.INTER_AREA
+        )
+
+        quant = (small // 12) * 12
+        flat = quant.reshape(-1, 3)
+        colors, counts = np.unique(flat, axis=0, return_counts=True)
+        top_idx = np.argsort(-counts)[:12]
+
+        raw_boxes: List[Tuple[int, int, int, int]] = []
+        min_area = max(2200, int(w * h * 0.012))
+        max_area = int(w * h * 0.72)
+
+        for idx in top_idx:
+            col = colors[idx]
+            mask = (np.all(np.abs(quant.astype(np.int16) - col.astype(np.int16)) <= 12, axis=2)).astype(np.uint8) * 255
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for cnt in contours:
+                sx, sy, scw, sch = cv2.boundingRect(cnt)
+                x = int(round(sx / scale))
+                y = int(round(sy / scale))
+                cw = min(w - x, int(round(scw / scale)))
+                ch = min(h - y, int(round(sch / scale)))
+                area = cw * ch
+                is_rail = ch >= int(h * 0.22) and 24 <= cw <= int(w * 0.24) and area >= 1800
+                is_bar = cw >= int(w * 0.22) and 24 <= ch <= int(h * 0.16) and area >= 1800
+                if (min_area <= area <= max_area and cw >= 40 and ch >= 36) or is_rail or is_bar:
+                    raw_boxes.append((x, y, cw, ch))
+
         gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-        blurred = cv2.GaussianBlur(gray, (3, 3), 0)
-        edges = cv2.Canny(blurred, 30, 105)
-
-        # Group nearby UI edges into container blocks without merging the whole screen
-        dilate_k = cv2.getStructuringElement(cv2.MORPH_RECT, (11, 11))
-        blocks = cv2.dilate(edges, dilate_k, iterations=2)
-        contours, _ = cv2.findContours(blocks, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        min_area = max(3500, int(w * h * 0.015))
-        max_area = int(w * h * 0.75)
-
-        candidates: List[Tuple[int, int, int, int]] = []
+        edges = cv2.Canny(cv2.GaussianBlur(gray, (3, 3), 0), 35, 110)
+        closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8), iterations=1)
+        contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         for cnt in contours:
             x, y, cw, ch = cv2.boundingRect(cnt)
             area = cw * ch
-            is_side_rail = ch >= int(h * 0.25) and 28 <= cw <= int(w * 0.25) and area >= 2500
-            is_top_bar = cw >= int(w * 0.25) and 28 <= ch <= int(h * 0.16) and area >= 2500
-            if (min_area <= area <= max_area and cw >= 45 and ch >= 40) or is_side_rail or is_top_bar:
-                candidates.append((x, y, cw, ch))
+            if min_area <= area <= max_area and cw >= 45 and ch >= 40:
+                raw_boxes.append((x, y, cw, ch))
 
-        deduped = self._dedupe_boxes(candidates, iou_threshold=0.45)
+        deduped = self._dedupe_boxes(raw_boxes, iou_threshold=0.40)
+        deduped.sort(key=lambda r: (r[1] // max(1, h // 4), r[0]))
+        chosen = deduped[:max_panels]
 
-        # Remove huge parent boxes that swallow multiple smaller distinct groups
-        filtered: List[Tuple[int, int, int, int]] = []
-        for box in deduped:
-            contained_count = sum(1 for other in deduped if other != box and self._contains(box, other))
-            if contained_count >= 2 and (box[2] * box[3]) > int(w * h * 0.45):
-                continue
-            filtered.append(box)
-
-        chosen = (filtered if filtered else deduped)[:max_panels]
-        chosen.sort(key=lambda r: (r[1] // max(1, h // 4), r[0]))
-
-        return [
-            DetectedRegion(
-                index=i + 1,
-                label=f"Group {i + 1}",
-                bbox=box,
-                kind="panel",
+        regions: List[DetectedRegion] = []
+        for i, box in enumerate(chosen):
+            role, can_zoom, hint = self.classify_region(frame_bgr, box, is_top_level=True)
+            regions.append(
+                DetectedRegion(
+                    index=i + 1,
+                    label=f"{role} {i + 1}",
+                    bbox=box,
+                    kind="panel",
+                    role=role,
+                    can_zoom=can_zoom,
+                    description=hint,
+                )
             )
-            for i, box in enumerate(chosen)
-        ]
+        return regions
 
     def detect_sector_elements(
         self,
@@ -181,7 +249,7 @@ class VisionGrounder:
         knowledge_map: Optional[Dict[str, str]] = None,
         max_elements: int = 16,
     ) -> List[DetectedRegion]:
-        """Detect sub-groups, buttons, and OCR text labels strictly inside sector_bbox."""
+        """Detect interactable controls, sliders, OCR labels, and sub-regions inside sector_bbox."""
         sx, sy, sw, sh = sector_bbox
         fh, fw = frame_bgr.shape[:2]
         x1 = max(0, sx)
@@ -193,7 +261,7 @@ class VisionGrounder:
 
         crop = frame_bgr[y1:y2, x1:x2]
         ch, cw = crop.shape[:2]
-        candidates: List[Tuple[str, Tuple[int, int, int, int], float, str]] = []
+        candidates: List[Tuple[str, Tuple[int, int, int, int], float, str, str, bool]] = []
 
         ocr = self._get_ocr()
         if ocr is not None:
@@ -208,64 +276,75 @@ class VisionGrounder:
                         ys = [int(pt[1]) for pt in quad]
                         bx = x1 + max(0, min(xs))
                         by = y1 + max(0, min(ys))
-                        bw = max(14, max(xs) - min(xs))
-                        bh = max(12, max(ys) - min(ys))
-                        desc = self._lookup_knowledge(text, knowledge_map)
-                        candidates.append((text, (bx, by, bw, bh), score, desc))
+                        bw = max(16, max(xs) - min(xs))
+                        bh = max(14, max(ys) - min(ys))
+                        role, can_zoom, hint = self.classify_region(frame_bgr, (bx, by, bw, bh), is_top_level=False)
+                        if role == "Panel":
+                            role = "Button"
+                        kb = self._lookup_knowledge(text, knowledge_map)
+                        desc = f"{kb} ({hint})" if kb else hint
+                        candidates.append((text, (bx, by, bw, bh), score, desc, role, can_zoom))
             except Exception:
                 pass
 
         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-        edges = cv2.Canny(gray, 40, 130)
+        blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+        edges = cv2.Canny(blurred, 35, 120)
         dilate_k = cv2.getStructuringElement(cv2.MORPH_RECT, (6, 6))
         dilated = cv2.dilate(edges, dilate_k, iterations=1)
         contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        min_w = max(18, min(48, cw // 8))
-        min_h = max(16, min(40, ch // 8))
-        max_w = max(min_w + 10, int(cw * 0.85))
-        max_h = max(min_h + 10, int(ch * 0.85))
+        min_w = max(16, min(36, cw // 12))
+        min_h = max(14, min(32, ch // 12))
+        max_w = max(min_w + 10, int(cw * 0.95))
+        max_h = max(min_h + 10, int(ch * 0.90))
 
         for cnt in contours:
             rx, ry, rw, rh = cv2.boundingRect(cnt)
             if min_w <= rw <= max_w and min_h <= rh <= max_h:
                 box = (x1 + rx, y1 + ry, rw, rh)
-                if not any(self._iou(box, c[1]) > 0.35 for c in candidates):
-                    candidates.append(("Item", box, 0.7, ""))
+                if not any(self._iou(box, c[1]) > 0.36 for c in candidates):
+                    role, can_zoom, hint = self.classify_region(frame_bgr, box, is_top_level=False)
+                    candidates.append((role, box, 0.75, hint, role, can_zoom))
 
-        deduped_items: List[Tuple[str, Tuple[int, int, int, int], float, str]] = []
+        deduped: List[Tuple[str, Tuple[int, int, int, int], float, str, str, bool]] = []
         for item in sorted(candidates, key=lambda c: c[1][2] * c[1][3], reverse=True):
-            if any(self._iou(item[1], ex[1]) > 0.45 for ex in deduped_items):
+            if any(self._iou(item[1], ex[1]) > 0.42 for ex in deduped):
                 continue
-            deduped_items.append(item)
+            deduped.append(item)
 
-        deduped_items.sort(key=lambda c: (c[1][1] // max(18, ch // 6), c[1][0]))
-        trimmed = deduped_items[:max_elements]
+        deduped.sort(key=lambda c: (c[1][1] // max(20, ch // 6), c[1][0]))
+        trimmed = deduped[:max_elements]
 
-        return [
-            DetectedRegion(
-                index=idx + 1,
-                label=label,
-                bbox=box,
-                kind="element",
-                confidence=conf,
-                description=desc,
+        out: List[DetectedRegion] = []
+        role_counts: Dict[str, int] = {}
+        for idx, (label, box, conf, desc, role, can_zoom) in enumerate(trimmed):
+            role_counts[role] = role_counts.get(role, 0) + 1
+            display_label = label if label != role else f"{role} {role_counts[role]}"
+            out.append(
+                DetectedRegion(
+                    index=idx + 1,
+                    label=display_label,
+                    bbox=box,
+                    kind="element",
+                    role=role,
+                    can_zoom=can_zoom,
+                    confidence=conf,
+                    description=desc,
+                )
             )
-            for idx, (label, box, conf, desc) in enumerate(trimmed)
-        ]
+        return out
 
     @staticmethod
     def subdivide_box(
         bbox: Tuple[int, int, int, int], rows: int = 2, cols: int = 2
     ) -> List[DetectedRegion]:
-        """Split any target box into numbered sub-zones for recursive deeper drill-down."""
+        """Split a target box into numbered sub-zones for fine hovering/clicking."""
         x, y, w, h = bbox
-        if w >= h * 2.2 and w >= 120:
+        if w >= h * 2.4 and w >= 140:
             rows, cols = 1, 3
-        elif h >= w * 2.2 and h >= 120:
+        elif h >= w * 2.4 and h >= 140:
             rows, cols = 3, 1
-        else:
-            rows, cols = rows, cols
 
         cell_w = max(1, w // cols)
         cell_h = max(1, h // rows)
@@ -280,9 +359,12 @@ class VisionGrounder:
                 out.append(
                     DetectedRegion(
                         index=idx,
-                        label=f"Sub {idx}",
+                        label=f"Zoom {idx}",
                         bbox=(cx, cy, max(1, cw), max(1, ch)),
                         kind="subzone",
+                        role="Zoomable",
+                        can_zoom=True,
+                        description="Zoom sub-zone — hover to inspect or say 'click' to activate.",
                     )
                 )
                 idx += 1

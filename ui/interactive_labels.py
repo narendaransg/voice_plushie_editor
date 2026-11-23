@@ -38,6 +38,22 @@ VIDEO_EDITOR_UI_MAP: Dict[str, Dict[str, str]] = {
         "title": "Timeline & Multi-Track Editor",
         "purpose": "Arrange, trim, split, and layer video and audio clips along time.",
     },
+    "button": {
+        "title": "Button / Action Control",
+        "purpose": "Interactive control — hover to inspect or click to trigger.",
+    },
+    "slider": {
+        "title": "Slider / Scrubber Control",
+        "purpose": "Continuous or stepped control — hover and nudge or drag to adjust.",
+    },
+    "zoomable": {
+        "title": "Zoomable Region",
+        "purpose": "Fine-grained area — zoom in for sub-spots or hover to position.",
+    },
+    "panel": {
+        "title": "UI Panel / Container",
+        "purpose": "Container group — drill down to inspect controls inside.",
+    },
 }
 
 
@@ -48,6 +64,8 @@ class InteractiveTarget:
     rect: QRect
     purpose: str
     kind: str = "group"  # "sector", "group", "subzone", "drop_target"
+    role: str = "Panel"  # "Button" | "Slider" | "Timeline" | "Zoomable" | "Panel"
+    can_zoom: bool = False
 
     @property
     def center(self) -> Tuple[int, int]:
@@ -114,9 +132,9 @@ def _match_editor_purpose(
     if fallback_key in active_map:
         return active_map[fallback_key]
     return (
-        f"Interactive region '{label}' inside the active video editor."
+        f"Interactive region '{label}' inside the active UI."
         if label
-        else "Interactive region in the active video editor."
+        else "Interactive region in the active UI."
     )
 
 
@@ -137,17 +155,16 @@ def _dynamic_plus_layout_sectors(
     preview_x = wx + rail_w + drawer_w + 4
     preview_w = max(180, (wx + ww - right_w - 4) - preview_x)
 
-    candidates: List[Tuple[str, QRect, str]] = [
-        ("Header", QRect(wx + rail_w, wy + 2, max(120, ww - rail_w - right_w), header_h), "header"),
-        ("Left Rail", QRect(wx + 2, main_top, rail_w, main_h + timeline_h), "left_rail"),
-        ("Media Drawer", QRect(wx + rail_w + 2, main_top, drawer_w, main_h), "drawer"),
-        ("Preview", QRect(preview_x, main_top, preview_w, main_h), "preview"),
-        ("Right Rail", QRect(wx + ww - right_w - 2, main_top, right_w, main_h), "right_rail"),
-        ("Timeline", QRect(wx + rail_w + 2, main_top + main_h + 2, max(200, ww - rail_w - right_w - 4), timeline_h), "timeline"),
+    candidates: List[Tuple[str, QRect, str, str, bool]] = [
+        ("Header", QRect(wx + rail_w, wy + 2, max(120, ww - rail_w - right_w), header_h), "header", "Panel", False),
+        ("Left Rail", QRect(wx + 2, main_top, rail_w, main_h + timeline_h), "left_rail", "Panel", True),
+        ("Drawer", QRect(wx + rail_w + 2, main_top, drawer_w, main_h), "drawer", "Panel", True),
+        ("Preview", QRect(preview_x, main_top, preview_w, main_h), "preview", "Zoomable", True),
+        ("Right Rail", QRect(wx + ww - right_w - 2, main_top, right_w, main_h), "right_rail", "Panel", True),
+        ("Timeline", QRect(wx + rail_w + 2, main_top + main_h + 2, max(200, ww - rail_w - right_w - 4), timeline_h), "timeline", "Timeline", True),
     ]
 
     result: List[InteractiveTarget] = []
-    # Keep genuinely distinct CV regions that are not tiny single-card boxes
     for d in detected:
         if d.rect.width() >= int(ww * 0.14) and d.rect.height() >= int(wh * 0.12):
             result.append(
@@ -157,6 +174,8 @@ def _dynamic_plus_layout_sectors(
                     rect=_clamp_to_window(d.rect, win),
                     purpose=d.purpose,
                     kind="sector",
+                    role=d.role,
+                    can_zoom=d.can_zoom,
                 )
             )
         if len(result) >= 6:
@@ -164,7 +183,7 @@ def _dynamic_plus_layout_sectors(
 
     if len(result) < 4:
         result = []
-        for idx, (title, rect, key) in enumerate(candidates, start=1):
+        for idx, (title, rect, key, role, can_zoom) in enumerate(candidates, start=1):
             result.append(
                 InteractiveTarget(
                     index=idx,
@@ -172,6 +191,8 @@ def _dynamic_plus_layout_sectors(
                     rect=_clamp_to_window(rect, win),
                     purpose=_match_editor_purpose(title, key, knowledge_map),
                     kind="sector",
+                    role=role,
+                    can_zoom=can_zoom,
                 )
             )
 
@@ -185,7 +206,7 @@ def _load_scanned_controls_in_rect(
     screen_w: int,
     screen_h: int,
     knowledge_map: Optional[Dict[str, str]] = None,
-    max_items: int = 14,
+    max_items: int = 16,
 ) -> List[InteractiveTarget]:
     if scan_file is None or not scan_file.exists():
         return []
@@ -220,8 +241,8 @@ def _load_scanned_controls_in_rect(
             for t in targets
         ):
             continue
-        name = (item.get("name") or "").strip() or f"Group {len(targets) + 1}"
-        purpose = (item.get("purpose") or "").strip() or _match_editor_purpose(name, "preview", knowledge_map)
+        name = (item.get("name") or "").strip() or f"Control {len(targets) + 1}"
+        purpose = (item.get("purpose") or "").strip() or _match_editor_purpose(name, "button", knowledge_map)
         targets.append(
             InteractiveTarget(
                 index=len(targets) + 1,
@@ -229,13 +250,15 @@ def _load_scanned_controls_in_rect(
                 rect=qrect,
                 purpose=purpose,
                 kind="group",
+                role="Button",
+                can_zoom=(w >= 80 and h >= 50),
             )
         )
     return targets
 
 
 class InteractiveLabelOverlay(QWidget):
-    """Dynamic sector -> sub-group -> drop-target overlay with instant hide/repaint."""
+    """Dynamic sector -> sub-group -> spot overlay with interactable role detection & instant hide."""
 
     def __init__(self, scan_file: Optional[Path] = None):
         super().__init__(None)
@@ -319,13 +342,17 @@ class InteractiveLabelOverlay(QWidget):
                     ),
                     win,
                 )
+                base_purp = _match_editor_purpose(p.label, p.role.lower(), self.knowledge_map)
+                full_purp = f"{base_purp} {p.description}".strip()
                 raw_detected.append(
                     InteractiveTarget(
                         index=idx,
                         name=p.label,
                         rect=qrect,
-                        purpose=_match_editor_purpose(p.label, "timeline", self.knowledge_map),
+                        purpose=full_purp,
                         kind="sector",
+                        role=p.role,
+                        can_zoom=p.can_zoom,
                     )
                 )
 
@@ -365,7 +392,7 @@ class InteractiveLabelOverlay(QWidget):
                     frame,
                     rel_bbox,
                     knowledge_map=self.knowledge_map,
-                    max_elements=14,
+                    max_elements=16,
                 )
                 for idx, el in enumerate(elems, start=1):
                     ex, ey, ew, eh = el.bbox
@@ -378,7 +405,8 @@ class InteractiveLabelOverlay(QWidget):
                         ),
                         win,
                     )
-                    purpose = el.description or _match_editor_purpose(el.label, "preview", self.knowledge_map)
+                    matched = _match_editor_purpose(el.label, el.role.lower(), self.knowledge_map)
+                    purpose = f"{matched} {el.description}".strip() if el.description else matched
                     sub_groups.append(
                         InteractiveTarget(
                             index=idx,
@@ -386,12 +414,14 @@ class InteractiveLabelOverlay(QWidget):
                             rect=qrect,
                             purpose=purpose,
                             kind="group",
+                            role=el.role,
+                            can_zoom=el.can_zoom,
                         )
                     )
 
             if len(sub_groups) < 2:
                 scanned = _load_scanned_controls_in_rect(
-                    self.scan_file, target.rect, win, screen_w, screen_h, self.knowledge_map, max_items=14
+                    self.scan_file, target.rect, win, screen_w, screen_h, self.knowledge_map, max_items=16
                 )
                 if len(scanned) >= 2:
                     sub_groups = scanned
@@ -405,10 +435,12 @@ class InteractiveLabelOverlay(QWidget):
                 sub_groups = [
                     InteractiveTarget(
                         index=sz.index,
-                        name=f"Group {sz.index}",
+                        name=f"Zoom {sz.index}",
                         rect=_clamp_to_window(QRect(sz.bbox[0], sz.bbox[1], sz.bbox[2], sz.bbox[3]), win),
                         purpose=target.purpose,
                         kind="group",
+                        role="Zoomable",
+                        can_zoom=True,
                     )
                     for sz in subzones
                 ]
@@ -425,6 +457,8 @@ class InteractiveLabelOverlay(QWidget):
                     rect=_clamp_to_window(QRect(sz.bbox[0], sz.bbox[1], sz.bbox[2], sz.bbox[3]), win),
                     purpose=target.purpose,
                     kind="subzone",
+                    role="Zoomable",
+                    can_zoom=True,
                 )
                 for sz in subzones
             ]
@@ -437,7 +471,7 @@ class InteractiveLabelOverlay(QWidget):
         return len(self._targets)
 
     def show_drop_targets(self, screen_w: int, screen_h: int) -> int:
-        """Show drop destinations (timeline slots, overlay track, preview) while holding a dragged clip."""
+        """Show drop destinations while holding a dragged item."""
         self._history.append((self._level_name, list(self._targets)))
         win = self._last_win_rect or _get_foreground_window_rect(screen_w, screen_h)
 
@@ -478,8 +512,10 @@ class InteractiveLabelOverlay(QWidget):
                 index=i,
                 name=label,
                 rect=_clamp_to_window(rect, win),
-                purpose=f"Drop dragged media onto {label}.",
+                purpose=f"Drop target ({label}) — move here, fine-tune, then say 'drop'.",
                 kind="drop_target",
+                role="Zoomable",
+                can_zoom=True,
             )
             for i, (label, rect) in enumerate(drop_specs, start=1)
         ]
@@ -559,12 +595,18 @@ class InteractiveLabelOverlay(QWidget):
                 accent_color = QColor(80, 210, 255, 235)
             else:
                 cx, cy = t.center
-                badge_w_est = min(136, max(36, len(f"{t.index}:{t.name[:13]}") * 7 + 14))
+                badge_w_est = min(144, max(36, len(f"{t.index}:{t.name[:14]}") * 7 + 14))
                 bx = max(2, min(self.width() - badge_w_est - 2, cx - badge_w_est // 2))
                 by = max(2, min(self.height() - 24, cy - 11))
                 if self._level_name == "drop_targets":
                     pill_color = QColor(36, 16, 44, 248)
                     accent_color = QColor(232, 121, 249, 250)
+                elif t.role == "Slider":
+                    pill_color = QColor(16, 28, 42, 248)
+                    accent_color = QColor(56, 189, 248, 245)
+                elif t.role == "Timeline":
+                    pill_color = QColor(30, 20, 10, 248)
+                    accent_color = QColor(251, 146, 60, 245)
                 elif self._level_name == "groups":
                     pill_color = QColor(24, 18, 8, 245)
                     accent_color = QColor(255, 198, 45, 240)
@@ -572,8 +614,8 @@ class InteractiveLabelOverlay(QWidget):
                     pill_color = QColor(16, 30, 24, 245)
                     accent_color = QColor(72, 224, 156, 240)
 
-            tag = f"{t.index}" if not t.name else f"{t.index}:{t.name[:13]}"
-            badge_w = max(32, min(140, len(tag) * 7 + 12))
+            tag = f"{t.index}" if not t.name else f"{t.index}:{t.name[:14]}"
+            badge_w = max(32, min(144, len(tag) * 7 + 12))
             badge_h = 20
             badge = QRect(bx, by, badge_w, badge_h)
 

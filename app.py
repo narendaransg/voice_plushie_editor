@@ -351,7 +351,9 @@ class PlushieController:
                 )
                 if target is not None:
                     move_mouse_to_screen(*target.center)
-                    return {"status": "cursor", "message": f"#{target.index} {target.name}: {target.purpose}"}
+                    zoom_tag = " [zoomable]" if getattr(target, "can_zoom", False) else ""
+                    role_tag = getattr(target, "role", "Control")
+                    return {"status": "cursor", "message": f"#{target.index} {target.name} ({role_tag}{zoom_tag}): {target.purpose}"}
             help_msg = self._lookup_purpose(text)
             if help_msg:
                 return {"status": "cursor", "message": help_msg}
@@ -404,9 +406,11 @@ class PlushieController:
                         "message": f"Hovering #{target.index} {target.name} -> '{lvl}' ({sub_count}) — pick a number, 'drag it', 'click', or 'go up'.",
                     }
 
+                role_tag = getattr(target, "role", "Target")
+                zoom_hint = ", 'zoom'" if getattr(target, "can_zoom", False) else ""
                 return {
                     "status": "cursor",
-                    "message": f"Hovering #{target.index} {target.name} — say 'drag it', 'click', 'go down', or 'go up'.",
+                    "message": f"Hovering #{target.index} {target.name} [{role_tag}] — say 'click'{zoom_hint}, 'drag it', or 'go up'.",
                 }
 
             if any(w in text for w in ("go down", "drill down", "deeper")) and self.label_overlay._targets:
