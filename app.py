@@ -1,6 +1,7 @@
 import argparse
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -48,7 +49,7 @@ WORD_NUMBERS = {
 
 
 class PlushieController:
-    """Connects overlay, dynamic editor profiles, multi-level labels, hover-first mover, keyboard nav, and voice."""
+    """Connects overlay, dynamic editor profiles, bidirectional levels, hover-first mover, drag/timeline edits, and voice."""
 
     def __init__(self, root_dir: Path, enable_voice: bool = True):
         self.root_dir = Path(root_dir)
@@ -156,7 +157,7 @@ class PlushieController:
             profile = self.editor_profiles.get(self.active_editor_key, {})
             tool_name = profile.get("app_name") or self.tool_map.get("detected_tool") or "Editor"
             self.overlay.status_label.setText(
-                f"{tool_name}: {count} sectors — say 'go to 2', 'zoom 1', 'click', or 'hide'."
+                f"{tool_name}: {count} sectors — say '2' to hover/drill, 'go up'/'back', or 'hide'."
             )
 
     def _on_continuous_tick(self) -> None:
@@ -182,6 +183,20 @@ class PlushieController:
         for phrase, val in sorted(WORD_NUMBERS.items(), key=lambda kv: -len(kv[0])):
             if re.search(rf"\b{re.escape(phrase)}\b", cleaned):
                 return val
+        return None
+
+    def _extract_two_numbers(self, text: str) -> Optional[Tuple[int, int]]:
+        nums: List[int] = []
+        for m in re.finditer(r"\b(\d{1,2})\b", text):
+            nums.append(int(m.group(1)))
+        if len(nums) < 2:
+            cleaned = re.sub(r"[^a-z\s]", " ", text)
+            cleaned = re.sub(r"\s+", " ", cleaned).strip()
+            for phrase, val in sorted(WORD_NUMBERS.items(), key=lambda kv: -len(kv[0])):
+                if re.search(rf"\b{re.escape(phrase)}\b", cleaned) and val not in nums:
+                    nums.append(val)
+        if len(nums) >= 2:
+            return nums[0], nums[1]
         return None
 
     def _refresh_theme_combo(self) -> None:
@@ -239,9 +254,23 @@ class PlushieController:
             return f"{mapped['matched_topic']}: {mapped['purpose']}"
         return None
 
+    def _perform_drag(self, start_xy: Optional[Tuple[int, int]], end_xy: Tuple[int, int], label: str) -> str:
+        if start_xy is not None:
+            move_mouse_to_screen(*start_xy)
+            time.sleep(0.04)
+        mouse_down("left")
+        time.sleep(0.05)
+        move_mouse_to_screen(*end_xy)
+        time.sleep(0.05)
+        mouse_up("left")
+        self.label_overlay.clear_labels()
+        return f"Dragged {label}."
+
     def _handle_cursor_utterance(self, utterance: str) -> Optional[dict]:
         text = re.sub(r"\s+", " ", utterance.lower()).strip()
-        step = 180 if any(w in text for w in ("far", "big", "lot", "fast")) else 60
+        fine_step = 35 if any(w in text for w in ("tiny", "fine", "little", "bit", "slow")) else 85
+        if any(w in text for w in ("far", "big", "lot", "fast")):
+            fine_step = 180
 
         # 0. Rescan active tool & profile
         if any(p in text for p in ("rescan", "scan app", "scan tool", "refresh map", "detect editor")):
@@ -253,7 +282,7 @@ class PlushieController:
                 "message": f"Detected '{tool_name}' ({info.get('uia_control_count', 0)} UIA controls).",
             }
 
-        # 1. Stop continuous movement / scroll (consume "stop" so it doesn't accidentally hit spacebar)
+        # 1. Stop continuous movement / scroll
         if text in ("stop", "halt", "freeze", "stop moving", "stop scrolling"):
             was_moving = self._cont_dir is not None or self._cont_scroll != 0
             self._stop_continuous()
@@ -262,14 +291,14 @@ class PlushieController:
                 "message": "Stopped continuous motion." if was_moving else "Motion already stopped.",
             }
 
-        # 2. Multi-level Sector & Control Navigation (Hover-first)
+        # 2. Show / Hide / Step Up & Down Levels (sectors <-> zones <-> groups)
         if any(p in text for p in ("show labels", "show sectors", "label controls", "show buttons", "sectors")):
             self._sync_active_editor_profile()
             sw, sh = get_screen_size()
             count = self.label_overlay.show_sectors(sw, sh, exclude_rect=self.overlay.geometry())
             return {
                 "status": "cursor",
-                "message": f"{count} sectors — say 'go to 2', 'zoom 1', 'what is 2', or 'hide'.",
+                "message": f"Level 'sectors' ({count}) — say a number to hover/drill, 'go up'/'back', or 'hide'.",
             }
 
         if any(p in text for p in ("hide labels", "close labels", "hide targets", "clear labels", "hide sectors", "hide", "cancel labels")):
@@ -277,11 +306,31 @@ class PlushieController:
             self.label_overlay.clear_labels()
             return {"status": "cursor", "message": "Overlay hidden."}
 
-        if text in ("back sector", "go back", "previous level", "level up", "back") and self.label_overlay.isVisible():
+        if any(p in text for p in ("go up", "level up", "back sector", "go back", "previous level", "back")) and self.label_overlay.isVisible():
             prev = self.label_overlay.go_back_level()
             if prev:
-                return {"status": "cursor", "message": f"Back to {prev}."}
-            return {"status": "cursor", "message": "Exited sector overlay."}
+                return {"status": "cursor", "message": f"Moved up to level '{prev}'."}
+            return {"status": "cursor", "message": "Exited overlay."}
+
+        # Drag target A to target B ("drag 2 to 6") or drag current/target to timeline
+        if "drag" in text and "to" in text and self.label_overlay.isVisible():
+            pair = self._extract_two_numbers(text)
+            if pair is not None:
+                src = self.label_overlay.get_target_by_number(pair[0])
+                dst = self.label_overlay.get_target_by_number(pair[1])
+                if src is not None and dst is not None:
+                    msg = self._perform_drag(src.center, dst.center, f"#{src.index} {src.name} -> #{dst.index} {dst.name}")
+                    return {"status": "cursor", "message": msg}
+
+        if "drag" in text and "timeline" in text:
+            sw, sh = get_screen_size()
+            trect = self.label_overlay.get_timeline_rect(sw, sh)
+            num = self._extract_target_number(text) if self.label_overlay.isVisible() else None
+            src = self.label_overlay.get_target_by_number(num) if num is not None else None
+            start_xy = src.center if src is not None else None
+            end_xy = (trect.center().x(), trect.center().y())
+            msg = self._perform_drag(start_xy, end_xy, "selection to timeline")
+            return {"status": "cursor", "message": msg}
 
         # Contextual help: what is X / what does X do
         if any(q in text for q in ("what is", "what does", "describe", "purpose", "use of")):
@@ -311,25 +360,7 @@ class PlushieController:
                 sw, sh = get_screen_size()
                 cx, cy = target.center
 
-                # Explicit sub-zone zoom ("zoom 2" / "deeper 2")
-                if any(w in text for w in ("zoom", "deeper", "subzone")) and "click" not in text:
-                    move_mouse_to_screen(cx, cy)
-                    sub_count = self.label_overlay.drill_into_target(target, sw, sh, force_subzone=True)
-                    return {
-                        "status": "cursor",
-                        "message": f"Zoomed '{target.name}' ({sub_count} zones) — hover a number or say 'click N'.",
-                    }
-
-                # Drill into sector unless explicitly asked to click
-                if target.kind == "sector" and ("click" not in text):
-                    move_mouse_to_screen(cx, cy)
-                    sub_count = self.label_overlay.drill_into_target(target, sw, sh)
-                    return {
-                        "status": "cursor",
-                        "message": f"Inside '{target.name}' ({sub_count} items) — say a number to hover, 'zoom N', or 'click N'.",
-                    }
-
-                # Explicit click commands on a numbered/named target
+                # Explicit click commands
                 if "right click" in text:
                     move_mouse_to_screen(cx, cy)
                     mouse_click("right")
@@ -346,14 +377,42 @@ class PlushieController:
                     self.label_overlay.clear_labels()
                     return {"status": "cursor", "message": f"Clicked {target.name}."}
 
-                # Default: HOVER-FIRST — move cursor to target and keep overlay visible so user can verify
+                # Hover first + drill down a level when picking a number or saying 'go down'/'drill down'/'zoom'/'go to'
                 move_mouse_to_screen(cx, cy)
+                wants_drill = any(w in text for w in ("go down", "drill down", "zoom", "deeper", "go to", "open", "inside"))
+                if num is not None or wants_drill:
+                    sub_count = self.label_overlay.drill_into_target(target, sw, sh)
+                    lvl = self.label_overlay.level_name
+                    return {
+                        "status": "cursor",
+                        "message": f"Hovering #{target.index} {target.name} -> level '{lvl}' ({sub_count}) — say a number, 'go up', or 'click'.",
+                    }
+
                 return {
                     "status": "cursor",
-                    "message": f"Hovering #{target.index} {target.name} — say 'click', 'double click', 'zoom {target.index}', or 'back'.",
+                    "message": f"Hovering #{target.index} {target.name} — say 'click', 'go down', 'go up', or 'hide'.",
                 }
 
-        # 3. Continuous Directional Hold & Relative Wheel Modes
+            # Drill down current level even without a specific target number
+            if any(w in text for w in ("go down", "drill down", "deeper")) and self.label_overlay._targets:
+                sw, sh = get_screen_size()
+                first = self.label_overlay._targets[0]
+                move_mouse_to_screen(*first.center)
+                sub_count = self.label_overlay.drill_into_target(first, sw, sh)
+                return {
+                    "status": "cursor",
+                    "message": f"Drilled to level '{self.label_overlay.level_name}' ({sub_count}) — say 'go up' to return.",
+                }
+
+        # 3. Timeline hover left / right & fine horizontal nudging
+        if any(p in text for p in ("hover left", "nudge left", "scrub left")):
+            ok, detail = move_mouse_relative(-fine_step, 0)
+            return {"status": "cursor", "message": f"Timeline hover left ({fine_step}px): {detail}" if ok else detail}
+        if any(p in text for p in ("hover right", "nudge right", "scrub right")):
+            ok, detail = move_mouse_relative(fine_step, 0)
+            return {"status": "cursor", "message": f"Timeline hover right ({fine_step}px): {detail}" if ok else detail}
+
+        # 4. Continuous Directional Hold & Relative Wheel Modes
         if any(p in text for p in ("start moving", "keep moving", "glide", "drift")):
             if "left" in text:
                 self._cont_dir = (-1, 0)
@@ -384,7 +443,7 @@ class PlushieController:
             self._cont_speed = max(2, self._cont_speed - 2)
             return {"status": "cursor", "message": f"Motion speed set to {self._cont_speed}."}
 
-        # 4. High-frequency editing macros from active profile
+        # 5. High-frequency editing macros from active profile
         active_profile = self.editor_profiles.get(self.active_editor_key)
         macro = match_editor_macro(text, active_profile)
         if macro is not None:
@@ -392,7 +451,7 @@ class PlushieController:
             ok, detail = send_key_combo(keys)
             return {"status": "cursor", "message": f"{label}: {detail}" if ok else detail}
 
-        # 5. Voice-Triggered Keyboard Navigation
+        # 6. Voice-Triggered Keyboard Navigation
         if text in ("shift tab", "back tab", "previous field"):
             ok, detail = send_key_combo(["shift", "tab"])
             return {"status": "cursor", "message": detail if ok else detail}
@@ -418,17 +477,17 @@ class PlushieController:
             ok, detail = send_key_combo(["esc"])
             return {"status": "cursor", "message": detail if ok else detail}
 
-        # 6. Direct single-step cursor / click / scroll controls
+        # 7. Direct single-step cursor / click / drag / scroll controls
         if "double click" in text:
             ok, detail = mouse_double_click()
             return {"status": "cursor", "message": detail if ok else detail}
         if "right click" in text:
             ok, detail = mouse_click("right")
             return {"status": "cursor", "message": detail if ok else detail}
-        if any(k in text for k in ("hold click", "mouse down", "drag start")):
+        if any(k in text for k in ("start drag", "hold click", "mouse down", "drag start")):
             ok, detail = mouse_down("left")
             return {"status": "cursor", "message": detail if ok else detail}
-        if any(k in text for k in ("release", "mouse up", "drop", "let go")):
+        if any(k in text for k in ("drop", "release", "mouse up", "drag end", "let go")):
             ok, detail = mouse_up("left")
             return {"status": "cursor", "message": detail if ok else detail}
         if text in ("click", "left click", "tap"):
@@ -443,16 +502,16 @@ class PlushieController:
             return {"status": "cursor", "message": detail if ok else detail}
 
         if "move left" in text or "go left" in text:
-            ok, detail = move_mouse_relative(-step, 0)
+            ok, detail = move_mouse_relative(-fine_step, 0)
             return {"status": "cursor", "message": detail if ok else detail}
         if "move right" in text or "go right" in text:
-            ok, detail = move_mouse_relative(step, 0)
+            ok, detail = move_mouse_relative(fine_step, 0)
             return {"status": "cursor", "message": detail if ok else detail}
         if "move up" in text or "go up" in text:
-            ok, detail = move_mouse_relative(0, -step)
+            ok, detail = move_mouse_relative(0, -fine_step)
             return {"status": "cursor", "message": detail if ok else detail}
         if "move down" in text or "go down" in text:
-            ok, detail = move_mouse_relative(0, step)
+            ok, detail = move_mouse_relative(0, fine_step)
             return {"status": "cursor", "message": detail if ok else detail}
 
         return None
