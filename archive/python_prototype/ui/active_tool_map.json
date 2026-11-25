@@ -1,0 +1,143 @@
+{
+  "detected_tool": "Open-Source Voice-Controlled Video Editing Plugin - Google Gemini - Google Chrome",
+  "window_title": "Open-Source Voice-Controlled Video Editing Plugin - Google Gemini - Google Chrome",
+  "process_name": "chrome.exe",
+  "rect": {
+    "left": -9,
+    "top": -9,
+    "right": 1929,
+    "bottom": 1049
+  },
+  "uia_control_count": 0,
+  "controls": [],
+  "knowledge_map": [
+    {
+      "name": "Media / Import",
+      "control_type": "ReferenceTool",
+      "rect": null,
+      "matched_topic": "Media / Import",
+      "purpose": "Import video clips, images, and audio files into the project bin and drag them onto the timeline.",
+      "key": "media"
+    },
+    {
+      "name": "Import Media",
+      "control_type": "ReferenceTool",
+      "rect": null,
+      "matched_topic": "Import Media",
+      "purpose": "Opens file selection to bring source footage, audio, or graphics into the editor.",
+      "key": "import"
+    },
+    {
+      "name": "Record & Create",
+      "control_type": "ReferenceTool",
+      "rect": null,
+      "matched_topic": "Record & Create",
+      "purpose": "Record screen, webcam, or voiceover directly into the editing project.",
+      "key": "record"
+    },
+    {
+      "name": "Content Library",
+      "control_type": "ReferenceTool",
+      "rect": null,
+      "matched_topic": "Content Library",
+      "purpose": "Browse stock video, stock audio, stickers, overlays, and backgrounds.",
+      "key": "library"
+    },
+    {
+      "name": "Templates",
+      "control_type": "ReferenceTool",
+      "rect": null,
+      "matched_topic": "Templates",
+      "purpose": "Start from pre-built video layouts, text styles, or social aspect-ratio presets.",
+      "key": "templates"
+    },
+    {
+      "name": "Text & Titles",
+      "control_type": "ReferenceTool",
+      "rect": null,
+      "matched_topic": "Text & Titles",
+      "purpose": "Add titles, animated text blocks, lower thirds, or callouts over clips.",
+      "key": "text"
+    },
+    {
+      "name": "Transitions",
+      "control_type": "ReferenceTool",
+      "rect": null,
+      "matched_topic": "Transitions",
+      "purpose": "Insert cuts, dissolves, wipes, or motion transitions between clips or at clip edges.",
+      "key": "transitions"
+    },
+    {
+      "name": "Captions / Subtitles",
+      "control_type": "ReferenceTool",
+      "rect": null,
+      "matched_topic": "Captions / Subtitles",
+      "purpose": "Generate, edit, or style captions/subtitles for spoken dialogue.",
+      "key": "captions"
+    },
+    {
+      "name": "Audio & Volume",
+      "control_type": "ReferenceTool",
+      "rect": null,
+      "matched_topic": "Audio & Volume",
+      "purpose": "Adjust clip volume, mute audio, detach audio, or apply audio fade-in/fade-out.",
+      "key": "audio"
+    },
+    {
+      "name": "Fade",
+      "control_type": "ReferenceTool",
+      "rect": null,
+      "matched_topic": "Fade",
+      "purpose": "Smoothly fade clip visuals or audio in at the start and out at the end.",
+      "key": "fade"
+    },
+    {
+      "name": "Filters",
+      "control_type": "ReferenceTool",
+      "rect": null,
+      "matched_topic": "Filters",
+      "purpose": "Apply stylized color looks or mood presets to selected video clips.",
+      "key": "filters"
+    },
+    {
+      "name": "Effects",
+      "control_type": "ReferenceTool",
+      "rect": null,
+      "matched_topic": "Effects",
+      "purpose": "Add visual effects such as blur, zoom/motion, glitch, or glow to clips.",
+      "key": "effects"
+    },
+    {
+      "name": "Adjust Colors",
+      "control_type": "ReferenceTool",
+      "rect": null,
+      "matched_topic": "Adjust Colors",
+      "purpose": "Fine-tune exposure, contrast, saturation, temperature, and tint.",
+      "key": "adjust"
+    },
+    {
+      "name": "Speed & Duration",
+      "control_type": "ReferenceTool",
+      "rect": null,
+      "matched_topic": "Speed & Duration",
+      "purpose": "Change playback speed (slow motion or time-lapse) and adjust clip duration.",
+      "key": "speed"
+    },
+    {
+      "name": "Timeline",
+      "control_type": "ReferenceTool",
+      "rect": null,
+      "matched_topic": "Timeline",
+      "purpose": "Arrange clips across tracks, scrub the playhead, split/trim clips, and zoom time.",
+      "key": "timeline"
+    },
+    {
+      "name": "Export / Share",
+      "control_type": "ReferenceTool",
+      "rect": null,
+      "matched_topic": "Export / Share",
+      "purpose": "Choose resolution/quality and render/export the finished video file.",
+      "key": "export"
+    }
+  ]
+}

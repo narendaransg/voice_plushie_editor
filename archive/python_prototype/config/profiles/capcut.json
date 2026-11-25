@@ -1,0 +1,14 @@
+{
+  "app_name": "CapCut",
+  "window_keywords": ["capcut"],
+  "commands": {
+    "play_pause": { "aliases": ["play", "pause", "stop"], "keys": ["space"], "supported": true },
+    "split": { "aliases": ["split", "cut", "blade"], "keys": ["ctrl", "b"], "supported": true },
+    "undo": { "aliases": ["undo", "oops"], "keys": ["ctrl", "z"], "supported": true },
+    "redo": { "aliases": ["redo"], "keys": ["ctrl", "shift", "z"], "supported": true },
+    "delete": { "aliases": ["delete", "remove"], "keys": ["backspace"], "supported": true, "requires_confirm": true },
+    "zoom_in": { "aliases": ["zoom in"], "keys": ["ctrl", "="], "supported": true },
+    "zoom_out": { "aliases": ["zoom out"], "keys": ["ctrl", "-"], "supported": true },
+    "custom_bitrate_export": { "aliases": ["export custom bitrate"], "keys": [], "supported": false, "reason": "Export bitrate presets aren't exposed via keyboard shortcuts." }
+  }
+}

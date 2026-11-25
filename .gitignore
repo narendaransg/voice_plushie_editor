@@ -1,3 +1,11 @@
-models/
 __pycache__/
 *.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+models/vosk/
+ui/active_tool_map.json
+*.log

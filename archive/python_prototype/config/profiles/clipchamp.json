@@ -1,0 +1,14 @@
+{
+  "app_name": "Clipchamp",
+  "window_keywords": ["clipchamp"],
+  "commands": {
+    "play_pause": { "aliases": ["play", "pause", "stop"], "keys": ["space"], "supported": true },
+    "split": { "aliases": ["split", "cut"], "keys": ["s"], "supported": true },
+    "undo": { "aliases": ["undo", "oops"], "keys": ["ctrl", "z"], "supported": true },
+    "redo": { "aliases": ["redo"], "keys": ["ctrl", "y"], "supported": true },
+    "delete": { "aliases": ["delete", "remove"], "keys": ["delete"], "supported": true, "requires_confirm": true },
+    "zoom_in": { "aliases": ["zoom in"], "keys": ["ctrl", "="], "supported": true },
+    "zoom_out": { "aliases": ["zoom out"], "keys": ["ctrl", "-"], "supported": true },
+    "ripple_delete": { "aliases": ["ripple delete"], "keys": [], "supported": false, "reason": "Clipchamp has no single shortcut for ripple delete." }
+  }
+}

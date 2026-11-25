@@ -1,0 +1,33 @@
+{
+  "id": "minimal_clean",
+  "display_name": "Minimal Clean",
+  "version": "1.0.0",
+  "plushie": {
+    "renderer": "vector_or_sprite",
+    "draggable": true,
+    "squeezable": true,
+    "colors": {
+      "primary": "#262A30",
+      "secondary": "#6C7A89",
+      "accent": "#4EA8DE",
+      "text": "#FFFFFF",
+      "danger": "#E55353"
+    },
+    "horror_mode": {
+      "triggers": [],
+      "revert_phrases": [],
+      "colors": {
+        "primary": "#262A30",
+        "secondary": "#6C7A89",
+        "accent": "#4EA8DE",
+        "text": "#FFFFFF",
+        "danger": "#E55353"
+      }
+    }
+  },
+  "comfort_and_night": {
+    "comfort_tint_rgba": [255, 200, 130, 32],
+    "night_dim_opacity": 0.85,
+    "break_reminder_minutes": 45
+  }
+}

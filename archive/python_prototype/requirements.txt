@@ -1,0 +1,7 @@
+PySide6
+vosk
+numpy
+opencv-python
+pillow
+mss
+rapidocr-onnxruntime

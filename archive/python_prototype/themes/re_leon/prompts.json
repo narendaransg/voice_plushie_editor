@@ -1,0 +1,24 @@
+{
+  "normal": {
+    "listening": "Ready ({mode} / {app}) — {voice_mode}.",
+    "executed": "Done: '{action}' [{keys}].",
+    "cant_do_unmapped": "Can't do '{action}' — not mapped in {app}.",
+    "cant_do_focus": "Can't send '{keys}' — {app} isn't focused or a text box is active.",
+    "cant_do_unsupported": "Can't do '{action}' — unsupported in current setup.",
+    "squeeze": "Squeak! Plushie squeezed.",
+    "horror_enter": "Church bell? Switching to survival-horror mode.",
+    "horror_exit": "Back to normal mode. Story of my life.",
+    "comfort_break": "Long edit stretch — want a quick break?"
+  },
+  "horror": {
+    "listening": "Locked in ({mode} / {app}) — {voice_mode}.",
+    "executed": "Executed '{action}' [{keys}].",
+    "cant_do_unmapped": "No luck — '{action}' isn't in your {app} inventory.",
+    "cant_do_focus": "Hold up — {app} isn't focused or text input is active.",
+    "cant_do_unsupported": "Can't do '{action}' — not supported here.",
+    "squeeze": "Careful — don't squeeze too hard.",
+    "horror_enter": "Where's everyone going? Bingo.",
+    "horror_exit": "Alright, back to normal. Story of my life.",
+    "comfort_break": "Even agents take a breather. Step back for a minute."
+  }
+}

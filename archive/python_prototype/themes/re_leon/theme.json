@@ -1,0 +1,40 @@
+{
+  "id": "re_leon",
+  "display_name": "Resident Evil — Leon S. Kennedy",
+  "version": "1.0.0",
+  "plushie": {
+    "renderer": "vector_or_sprite",
+    "draggable": true,
+    "squeezable": true,
+    "colors": {
+      "primary": "#2A3B55",
+      "secondary": "#C99A5B",
+      "accent": "#58A6FF",
+      "text": "#F5F7FA",
+      "danger": "#E05252"
+    },
+    "horror_mode": {
+      "triggers": [
+        "where's everyone going bingo",
+        "wheres everyone going bingo",
+        "bingo"
+      ],
+      "revert_phrases": [
+        "story of my life",
+        "calm down leon"
+      ],
+      "colors": {
+        "primary": "#1A0D10",
+        "secondary": "#8F1D2C",
+        "accent": "#39D353",
+        "text": "#F2E9E4",
+        "danger": "#FF2A3C"
+      }
+    }
+  },
+  "comfort_and_night": {
+    "comfort_tint_rgba": [255, 194, 115, 36],
+    "night_dim_opacity": 0.80,
+    "break_reminder_minutes": 45
+  }
+}

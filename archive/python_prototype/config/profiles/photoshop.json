@@ -1,0 +1,14 @@
+{
+  "app_name": "Photoshop",
+  "window_keywords": ["photoshop", "adobe photoshop"],
+  "commands": {
+    "undo": { "aliases": ["undo", "oops"], "keys": ["ctrl", "z"], "supported": true },
+    "redo": { "aliases": ["redo"], "keys": ["ctrl", "shift", "z"], "supported": true },
+    "brush": { "aliases": ["brush", "paint"], "keys": ["b"], "supported": true },
+    "eraser": { "aliases": ["eraser", "erase"], "keys": ["e"], "supported": true },
+    "zoom_in": { "aliases": ["zoom in"], "keys": ["ctrl", "+"], "supported": true },
+    "zoom_out": { "aliases": ["zoom out"], "keys": ["ctrl", "-"], "supported": true },
+    "fit_screen": { "aliases": ["fit screen", "zoom fit"], "keys": ["ctrl", "0"], "supported": true },
+    "timeline_cut": { "aliases": ["split", "cut clip"], "keys": [], "supported": false, "reason": "Timeline clip splitting isn't a standard Photoshop tool." }
+  }
+}
