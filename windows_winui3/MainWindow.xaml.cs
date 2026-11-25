@@ -23,7 +23,7 @@ public partial class MainWindow : Window
         var profiles = ProfileLoader.LoadProfiles(Path.Combine(repoRoot, "config", "profiles"));
         _router = new CommandRouter(profiles);
 
-        _voice = new VoiceService();
+        _voice = new VoiceService(repoRoot);
         _voice.UtteranceHeard += text => Dispatcher.Invoke(() => DispatchCommand(text));
         _voice.StatusUpdated += msg => Dispatcher.Invoke(() => StatusText.Text = msg);
 
