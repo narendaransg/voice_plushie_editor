@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Save Room Plushie</string>
+    <string name="shield_channel_name">Biohazard Containment Shield</string>
+    <string name="shield_channel_desc">Monitors active study lock and Instagram distraction guard</string>
+</resources>

@@ -1,0 +1,25 @@
+#!/usr/bin/env sh
+set -eu
+
+APP_HOME="$(cd "$(dirname "$0")" && pwd)"
+GRADLE_CACHE="${GRADLE_USER_HOME:-$HOME/.gradle}"
+WRAPPER_PROPS="$APP_HOME/gradle/wrapper/gradle-wrapper.properties"
+DIST_URL="$(sed -n 's/^distributionUrl=//p' "$WRAPPER_PROPS" | sed 's/\\//g')"
+ZIP_NAME="$(basename "$DIST_URL")"
+DIST_DIR="$GRADLE_CACHE/custom-dists/${ZIP_NAME%.zip}"
+
+if [ ! -x "$DIST_DIR/bin/gradle" ]; then
+  mkdir -p "$GRADLE_CACHE/custom-dists"
+  TMP_ZIP="$GRADLE_CACHE/custom-dists/$ZIP_NAME"
+  echo "Downloading Gradle distribution ($ZIP_NAME)..." >&2
+  curl -fsSL "$DIST_URL" -o "$TMP_ZIP"
+  unzip -qo "$TMP_ZIP" -d "$GRADLE_CACHE/custom-dists"
+  EXTRACTED_ROOT="$(find "$GRADLE_CACHE/custom-dists" -maxdepth 1 -type d -name "gradle-*" ! -path "$DIST_DIR" | head -n 1)"
+  if [ -n "$EXTRACTED_ROOT" ] && [ "$EXTRACTED_ROOT" != "$DIST_DIR" ]; then
+    mv "$EXTRACTED_ROOT" "$DIST_DIR"
+  fi
+  rm -f "$TMP_ZIP"
+  chmod +x "$DIST_DIR/bin/gradle"
+fi
+
+exec "$DIST_DIR/bin/gradle" -p "$APP_HOME" "$@"
