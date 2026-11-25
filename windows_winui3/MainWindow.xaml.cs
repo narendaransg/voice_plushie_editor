@@ -12,6 +12,7 @@ namespace VoicePlushie;
 public partial class MainWindow : Window
 {
     private readonly CommandRouter _router;
+    private readonly VoiceService _voice;
     private readonly Window _badgeOverlay;
     private readonly Canvas _badgeCanvas;
     private bool _cleanedUp;
@@ -21,6 +22,10 @@ public partial class MainWindow : Window
         var repoRoot = FindRepoRoot();
         var profiles = ProfileLoader.LoadProfiles(Path.Combine(repoRoot, "config", "profiles"));
         _router = new CommandRouter(profiles);
+
+        _voice = new VoiceService();
+        _voice.UtteranceHeard += text => Dispatcher.Invoke(() => DispatchCommand(text));
+        _voice.StatusUpdated += msg => Dispatcher.Invoke(() => StatusText.Text = msg);
 
         _badgeCanvas = new Canvas { Background = Brushes.Transparent };
         _badgeOverlay = new Window
@@ -49,6 +54,9 @@ public partial class MainWindow : Window
             EditorCombo.SelectedItem = profiles.ContainsKey("clipchamp") ? "clipchamp" : EditorCombo.Items[0];
         }
 
+        _voice.Start();
+        UpdateMicButtonText();
+
         Closed += (_, _) => CleanupAll();
     }
 
@@ -66,6 +74,11 @@ public partial class MainWindow : Window
         return Environment.CurrentDirectory;
     }
 
+    private void UpdateMicButtonText()
+    {
+        MicBtn.Content = _voice.IsListening ? "Mic: On" : "Mic: Off";
+    }
+
     private void RefreshOverlayVisuals()
     {
         if (_router.ActiveTargets.Count == 0)
@@ -78,29 +91,35 @@ public partial class MainWindow : Window
             return;
         }
 
+        double scale = Win32InputService.GetDpiScale(new WindowInteropHelper(this).Handle);
         var (sw, sh) = Win32InputService.GetScreenSize();
         _badgeOverlay.Left = 0;
         _badgeOverlay.Top = 0;
-        _badgeOverlay.Width = sw;
-        _badgeOverlay.Height = sh;
+        _badgeOverlay.Width = sw / scale;
+        _badgeOverlay.Height = sh / scale;
 
         _badgeCanvas.Children.Clear();
         bool drawBox = _router.CurrentLevel == "sectors";
 
         foreach (var t in _router.ActiveTargets)
         {
+            double lx = t.Left / scale;
+            double ly = t.Top / scale;
+            double lw = Math.Max(8, t.Width / scale);
+            double lh = Math.Max(8, t.Height / scale);
+
             if (drawBox)
             {
                 var rect = new System.Windows.Shapes.Rectangle
                 {
-                    Width = Math.Max(8, t.Width),
-                    Height = Math.Max(8, t.Height),
+                    Width = lw,
+                    Height = lh,
                     Stroke = new SolidColorBrush(Color.FromRgb(80, 210, 255)),
                     StrokeThickness = 2,
                     Fill = Brushes.Transparent
                 };
-                Canvas.SetLeft(rect, t.Left);
-                Canvas.SetTop(rect, t.Top);
+                Canvas.SetLeft(rect, lx);
+                Canvas.SetTop(rect, ly);
                 _badgeCanvas.Children.Add(rect);
             }
 
@@ -129,8 +148,10 @@ public partial class MainWindow : Window
                 }
             };
 
-            double bx = drawBox ? t.Left + 4 : Math.Max(4, t.CenterX - 36);
-            double by = drawBox ? t.Top + 4 : Math.Max(4, t.CenterY - 12);
+            double centerX = lx + lw / 2.0;
+            double centerY = ly + lh / 2.0;
+            double bx = drawBox ? Math.Max(4, lx + 4) : Math.Max(4, centerX - 36);
+            double by = drawBox ? Math.Max(4, ly + 4) : Math.Max(4, centerY - 12);
             Canvas.SetLeft(badge, bx);
             Canvas.SetTop(badge, by);
             _badgeCanvas.Children.Add(badge);
@@ -153,6 +174,19 @@ public partial class MainWindow : Window
         {
             RefreshOverlayVisuals();
         }
+    }
+
+    private void MicBtn_Click(object sender, RoutedEventArgs e)
+    {
+        if (_voice.IsListening)
+        {
+            _voice.Stop();
+        }
+        else
+        {
+            _voice.Start();
+        }
+        UpdateMicButtonText();
     }
 
     private void EditorCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -192,6 +226,8 @@ public partial class MainWindow : Window
     {
         if (_cleanedUp) return;
         _cleanedUp = true;
+        _voice.Stop();
+        _voice.Dispose();
         _router.ReleaseAll();
         try
         {

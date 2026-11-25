@@ -78,12 +78,12 @@ public static class Win32InputService
     private static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
 
     [DllImport("user32.dll")]
+    private static extern uint GetDpiForWindow(IntPtr hwnd);
+
+    [DllImport("user32.dll")]
     private static extern int GetSystemMetrics(int nIndex);
 
     [DllImport("user32.dll")]
-    private static extern bool GetCursorPos(out POINT lpPoint);
-
-    [DllImport("user32.dll", SetLastError = true)]
     private static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
 
     [DllImport("user32.dll")]
@@ -99,6 +99,30 @@ public static class Win32InputService
     private const uint SWP_NOMOVE = 0x0002;
     private const uint SWP_NOSIZE = 0x0001;
     private const uint SWP_NOACTIVATE = 0x0010;
+
+    public static double GetDpiScale(IntPtr hwnd = default)
+    {
+        if (hwnd == IntPtr.Zero)
+        {
+            hwnd = GetForegroundWindow();
+        }
+        if (hwnd != IntPtr.Zero)
+        {
+            try
+            {
+                uint dpi = GetDpiForWindow(hwnd);
+                if (dpi >= 96)
+                {
+                    return dpi / 96.0;
+                }
+            }
+            catch
+            {
+                // Fallback below
+            }
+        }
+        return 1.0;
+    }
 
     public static void ConfigureClickThroughOverlay(IntPtr hwnd)
     {
@@ -121,22 +145,24 @@ public static class Win32InputService
         var hwnd = GetForegroundWindow();
         if (hwnd != IntPtr.Zero && GetWindowRect(hwnd, out var r) && r.Width > 120 && r.Height > 120)
         {
-            return r;
+            return new RECT
+            {
+                Left = Math.Clamp(r.Left, 0, sw),
+                Top = Math.Clamp(r.Top, 0, sh),
+                Right = Math.Clamp(r.Right, 0, sw),
+                Bottom = Math.Clamp(r.Bottom, 0, sh)
+            };
         }
         return new RECT { Left = 0, Top = 0, Right = sw, Bottom = sh };
-    }
-
-    public static POINT GetCursorPosition()
-    {
-        GetCursorPos(out var pt);
-        return pt;
     }
 
     public static void MoveTo(int x, int y)
     {
         var (sw, sh) = GetScreenSize();
-        int absX = (int)Math.Round(x * 65535.0 / Math.Max(1, sw - 1));
-        int absY = (int)Math.Round(y * 65535.0 / Math.Max(1, sh - 1));
+        int clampedX = Math.Clamp(x, 0, Math.Max(1, sw - 1));
+        int clampedY = Math.Clamp(y, 0, Math.Max(1, sh - 1));
+        int absX = (int)Math.Round(clampedX * 65535.0 / Math.Max(1, sw - 1));
+        int absY = (int)Math.Round(clampedY * 65535.0 / Math.Max(1, sh - 1));
         var inp = new INPUT
         {
             type = INPUT_MOUSE,

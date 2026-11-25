@@ -63,6 +63,14 @@ public sealed class CommandRouter
         int previewX = x + leftW + drawerW + 4;
         int previewW = Math.Max(180, (x + w - rightW - 4) - previewX);
 
+        var uiaTargets = UiaGrounder.DetectActiveWindowControls(12);
+        if (uiaTargets.Count >= 3)
+        {
+            ActiveTargets = uiaTargets;
+            CurrentLevel = "groups";
+            return ActiveTargets.Count;
+        }
+
         ActiveTargets = new List<OverlayTargetItem>
         {
             new() { Index = 1, Name = "Header", Role = "Panel", Left = x + leftW, Top = y + 2, Width = Math.Max(120, w - leftW - rightW), Height = headerH },

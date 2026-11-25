@@ -2,8 +2,8 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Voice Plushie Editor"
-        Width="440"
-        Height="210"
+        Width="470"
+        Height="215"
         Topmost="True"
         ResizeMode="CanMinimize"
         Background="#121824">
@@ -26,24 +26,25 @@
                        Margin="0,0,0,10" />
 
             <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,10">
-                <ComboBox x:Name="EditorCombo" Width="130" Margin="0,0,8,0" SelectionChanged="EditorCombo_SelectionChanged" />
-                <Button x:Name="SectorsBtn" Content="Sectors" Width="80" Margin="0,0,8,0" Click="SectorsBtn_Click" />
-                <Button x:Name="DragBtn" Content="Drag" Width="70" Margin="0,0,8,0" Click="DragBtn_Click" />
-                <Button x:Name="DropBtn" Content="Drop" Width="70" Margin="0,0,8,0" Click="DropBtn_Click" />
-                <Button x:Name="QuitBtn" Content="Quit" Width="70" Click="QuitBtn_Click" />
+                <ComboBox x:Name="EditorCombo" Width="115" Margin="0,0,6,0" SelectionChanged="EditorCombo_SelectionChanged" />
+                <Button x:Name="MicBtn" Content="Mic: Off" Width="72" Margin="0,0,6,0" Click="MicBtn_Click" />
+                <Button x:Name="SectorsBtn" Content="Sectors" Width="72" Margin="0,0,6,0" Click="SectorsBtn_Click" />
+                <Button x:Name="DragBtn" Content="Drag" Width="58" Margin="0,0,6,0" Click="DragBtn_Click" />
+                <Button x:Name="DropBtn" Content="Drop" Width="58" Margin="0,0,6,0" Click="DropBtn_Click" />
+                <Button x:Name="QuitBtn" Content="Quit" Width="58" Click="QuitBtn_Click" />
             </StackPanel>
 
             <StackPanel Grid.Row="2" Orientation="Horizontal" VerticalAlignment="Center">
                 <TextBox x:Name="CommandBox"
-                         Width="290"
+                         Width="315"
                          Height="28"
                          Margin="0,0,8,0"
                          KeyDown="CommandBox_KeyDown" />
-                <Button x:Name="RunCmdBtn" Content="Send Voice/Cmd" Width="110" Height="28" Click="RunCmdBtn_Click" />
+                <Button x:Name="RunCmdBtn" Content="Send Cmd" Width="110" Height="28" Click="RunCmdBtn_Click" />
             </StackPanel>
 
             <TextBlock Grid.Row="3"
-                       Text="Hover-first: say or send 'show sectors', '2', 'drag', 'drop', 'hover left/right', 'go up', or 'hide'."
+                       Text="Say or send 'show sectors', '2', 'drag', 'drop', 'hover left/right', 'go up', or 'hide'."
                        Foreground="#9CA3AF"
                        FontSize="11"
                        TextWrapping="Wrap" />
