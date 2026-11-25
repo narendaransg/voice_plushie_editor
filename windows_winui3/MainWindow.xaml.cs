@@ -14,23 +14,13 @@ public partial class MainWindow : Window
     private readonly CommandRouter _router;
     private readonly Window _badgeOverlay;
     private readonly Canvas _badgeCanvas;
+    private bool _cleanedUp;
 
     public MainWindow()
     {
-        InitializeComponent();
-
         var repoRoot = FindRepoRoot();
         var profiles = ProfileLoader.LoadProfiles(Path.Combine(repoRoot, "config", "profiles"));
         _router = new CommandRouter(profiles);
-
-        foreach (var k in profiles.Keys)
-        {
-            EditorCombo.Items.Add(k);
-        }
-        if (EditorCombo.Items.Count > 0)
-        {
-            EditorCombo.SelectedItem = profiles.ContainsKey("clipchamp") ? "clipchamp" : EditorCombo.Items[0];
-        }
 
         _badgeCanvas = new Canvas { Background = Brushes.Transparent };
         _badgeOverlay = new Window
@@ -47,6 +37,17 @@ public partial class MainWindow : Window
             var hwnd = new WindowInteropHelper(_badgeOverlay).Handle;
             Win32InputService.ConfigureClickThroughOverlay(hwnd);
         };
+
+        InitializeComponent();
+
+        foreach (var k in profiles.Keys)
+        {
+            EditorCombo.Items.Add(k);
+        }
+        if (EditorCombo.Items.Count > 0)
+        {
+            EditorCombo.SelectedItem = profiles.ContainsKey("clipchamp") ? "clipchamp" : EditorCombo.Items[0];
+        }
 
         Closed += (_, _) => CleanupAll();
     }
@@ -69,7 +70,10 @@ public partial class MainWindow : Window
     {
         if (_router.ActiveTargets.Count == 0)
         {
-            _badgeOverlay.Hide();
+            if (_badgeOverlay.IsVisible)
+            {
+                _badgeOverlay.Hide();
+            }
             _badgeCanvas.Children.Clear();
             return;
         }
@@ -143,8 +147,7 @@ public partial class MainWindow : Window
 
     private void DispatchCommand(string utterance)
     {
-        bool changed;
-        string msg = _router.HandleUtterance(utterance, out changed);
+        string msg = _router.HandleUtterance(utterance, out bool changed);
         StatusText.Text = msg;
         if (changed)
         {
@@ -187,11 +190,20 @@ public partial class MainWindow : Window
 
     private void CleanupAll()
     {
+        if (_cleanedUp) return;
+        _cleanedUp = true;
         _router.ReleaseAll();
-        if (_badgeOverlay.IsVisible)
+        try
         {
-            _badgeOverlay.Hide();
+            if (_badgeOverlay.IsVisible)
+            {
+                _badgeOverlay.Hide();
+            }
+            _badgeOverlay.Close();
         }
-        _badgeOverlay.Close();
+        catch
+        {
+            // Ignore if overlay window was never shown
+        }
     }
 }
