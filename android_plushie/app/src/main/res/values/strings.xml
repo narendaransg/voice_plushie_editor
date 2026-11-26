@@ -1,5 +1,9 @@
 <resources>
     <string name="app_name">Save Room Plushie</string>
     <string name="shield_channel_name">Biohazard Containment Shield</string>
-    <string name="shield_channel_desc">Monitors active study lock and Instagram distraction guard</string>
+    <string name="shield_channel_desc">Monitors active study lock and blocked distraction apps</string>
+    <string name="task_channel_name">Save Room Task Alarms</string>
+    <string name="task_channel_desc">Scheduled to-do reminders from Attache Case</string>
+    <string name="care_channel_name">Axolotl Care Alerts</string>
+    <string name="care_channel_desc">Reminders when Specimen #AX-01 is hungry or needs petting</string>
 </resources>

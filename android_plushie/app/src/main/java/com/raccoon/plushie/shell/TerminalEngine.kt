@@ -10,7 +10,13 @@ data class ShellCommandResult(
     val unlockShinyAxolotl: Boolean = false,
     val toggleTermTheme: Boolean = false,
     val triggerStaReport: Boolean = false,
+    val triggerMerchant: Boolean = false,
+    val triggerMinecraftEgg: Boolean = false,
     val mixHerbs: Boolean = false,
+    val newTodoTitle: String? = null,
+    val blockPkgName: String? = null,
+    val unblockPkgName: String? = null,
+    val saveApkToRepo: Boolean = false,
     val launchTermuxCommand: String? = null
 )
 
@@ -49,15 +55,23 @@ object TerminalEngine {
         return when {
             lower == "help" -> ShellCommandResult(
                 """
-                Save Room Shell + Linux/RE/VLSI/Axolotl Commands:
+                Save Room Shell + RE / Linux / Minecraft / VLSI Commands:
                   saferoom [mins]   Start Pomodoro containment (default 25m)
-                  scan              Check Instagram & focus status
+                  scan              Check blocked apps & focus status
+                  block <pkg>       Add package to containment shield
+                  unblock <pkg>     Remove package from shield
+                  todo <task>       Add task to Attache Case to-do list
+                  save-apk          Stage APK export path / log repo release note
                   sta               Run VLSI Static Timing Analysis focus check
+                  synth             Run quick ASIC/RTL focus synthesis check
                   herb mix          Combine herbs into stamina points
                   spawn axolotl     Summon Specimen #AX-01 (Shiny Blue Axolotl)
+                  merchant          Summon the Save Room Merchant
+                  nether            Trigger Minecraft Redstone/Nether easter egg
+                  dmesg             Print Save Room kernel/sensor boot log
                   tty               Toggle green/amber terminal theme
                   termux <cmd>      Bridge command into Termux app if installed
-                  sh <linux_cmd>    Run real /system/bin/sh command (e.g. ls, uname -a, ps)
+                  sh <linux_cmd>    Run real /system/bin/sh command
                 """.trimIndent()
             )
 
@@ -70,15 +84,39 @@ object TerminalEngine {
             }
 
             lower == "scan" || lower == "ps-threat" -> ShellCommandResult(
-                """
-                [SCAN] Threat monitor armed: com.instagram.android
-                [SCAN] Sensor hooks: ACCEL, GYRO, LIGHT, PROXIMITY active.
-                """.trimIndent()
+                "[SCAN] Shield active on configured packages. Sensors ACCEL/GYRO/LIGHT/PROX armed."
+            )
+
+            lower.startsWith("block ") -> {
+                val pkg = cmd.substringAfter("block ").trim()
+                if (pkg.isEmpty()) ShellCommandResult("[BLOCK] Usage: block <com.package.name>")
+                else ShellCommandResult("[BLOCK] Added '$pkg' to Bio-Shield block list.", blockPkgName = pkg)
+            }
+
+            lower.startsWith("unblock ") -> {
+                val pkg = cmd.substringAfter("unblock ").trim()
+                if (pkg.isEmpty()) ShellCommandResult("[UNBLOCK] Usage: unblock <com.package.name>")
+                else ShellCommandResult("[UNBLOCK] Removed '$pkg' from Bio-Shield block list.", unblockPkgName = pkg)
+            }
+
+            lower.startsWith("todo ") -> {
+                val title = cmd.substringAfter("todo ").trim()
+                if (title.isEmpty()) ShellCommandResult("[TODO] Usage: todo <task description>")
+                else ShellCommandResult("[TODO] Added '$title' to Attache Case.", newTodoTitle = title)
+            }
+
+            lower == "save-apk" || lower == "repo-apk" -> ShellCommandResult(
+                output = "[REPO-APK] Run on WSL2 laptop: mkdir -p release && cp app/build/outputs/apk/debug/app-debug.apk release/SaveRoomPlushie-debug.apk",
+                saveApkToRepo = true
             )
 
             lower == "sta" -> ShellCommandResult(
-                output = "[STA] clock: clk_study (50MHz) | WNS: +0.42ns | TNS: 0.00ns | Slack: MET",
+                output = "[STA] clk: clk_study (50MHz) | WNS: +0.42ns | TNS: 0.00ns | Slack: MET",
                 triggerStaReport = true
+            )
+
+            lower == "synth" -> ShellCommandResult(
+                output = "[GENUS/YOSYS] Cell area: 14.2k um^2 | Power: 1.18mW | Doomscroll FF: 0"
             )
 
             lower == "herb mix" -> ShellCommandResult(
@@ -89,6 +127,24 @@ object TerminalEngine {
             lower == "spawn axolotl" || lower.contains("shiny") -> ShellCommandResult(
                 output = "[UMBRELLA-LAB] Specimen #AX-01 (Shiny Blue Axolotl, 1/1200) materialized!",
                 unlockShinyAxolotl = true
+            )
+
+            lower == "merchant" -> ShellCommandResult(
+                output = "[MERCHANT] 'Hehehe... got somethin' that might interest ya! (+15 Herb pts)'",
+                triggerMerchant = true
+            )
+
+            lower == "nether" || lower == "redstone" -> ShellCommandResult(
+                output = "[MINECRAFT] Obsidian frame lit! Shiny Axolotl bucket + 64 Redstone dust synced.",
+                triggerMinecraftEgg = true
+            )
+
+            lower == "dmesg" -> ShellCommandResult(
+                """
+                [    0.000] raccoon-os 6.6-save-room initializing sensors
+                [    0.112] axolotl_lab: specimen #AX-01 shimmer bus online
+                [    0.240] bioshield: watching target packages during study lock
+                """.trimIndent()
             )
 
             lower == "tty" || lower == "sudo su" -> ShellCommandResult(

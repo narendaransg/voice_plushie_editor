@@ -1,11 +1,29 @@
-__pycache__/
-*.py[cod]
-*$py.class
-*.egg-info/
-dist/
+# Gradle caches
+.gradle/
+**/.gradle/
+**/.gradle/**
+
+# Build outputs
 build/
-.venv/
-venv/
-models/vosk/
-ui/active_tool_map.json
+**/build/
+
+# Local IDE and machine files
+local.properties
+.idea/
+*.iml
+.DS_Store
+Thumbs.db
+
+# Signing keys and sensitive files
+*.keystore
+*.jks
+*.p12
+*.pfx
+
+# Logs and generated packages
 *.log
+release/
+
+# Local-only assets
+assets/
+models/

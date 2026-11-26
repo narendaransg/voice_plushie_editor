@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+
+set -u
+
+REPO_ROOT="$HOME/voice_plushie_editor"
+APP_DIR="$REPO_ROOT/android_plushie"
+RELEASE_DIR="$REPO_ROOT/release/friend-pack"
+
+SUBCMD="${1:-help}"
+
+if [[ $# -gt 0 ]]; then
+    shift
+fi
+
+case "$SUBCMD" in
+
+    build|update)
+        echo "=== SAVE ROOM PLUSHIE BUILD ==="
+
+        if [[ ! -d "$APP_DIR" ]]; then
+            echo "Android project not found: $APP_DIR"
+            exit 1
+        fi
+
+        cd "$APP_DIR" || exit 1
+
+        ./gradlew assembleDebug || exit 1
+
+        ./scripts/export_friend_pack.sh || exit 1
+
+        APK="$RELEASE_DIR/SaveRoomPlushie-debug.apk"
+
+        if [[ -f "$APK" ]]; then
+            echo "APK exported: $APK"
+
+            if command -v adb >/dev/null 2>&1 &&
+               adb get-state >/dev/null 2>&1; then
+
+                adb install -r "$APK" || exit 1
+
+                adb shell am start \
+                    -n com.raccoon.plushie/.MainActivity
+
+            else
+                echo "APK ready. Connect an Android device using ADB."
+            fi
+        else
+            echo "APK not found at expected export path:"
+            echo "$APK"
+            echo "Check export_friend_pack.sh output location."
+            exit 1
+        fi
+        ;;
+
+    post)
+        POSTER_ID="${1:-dispatch-001}"
+        TITLE="${2:-SAVE ROOM TRANSMISSION}"
+        MESSAGE="${3:-New Save Room update live.}"
+        ADMIN_ID="${PLUSHIE_ADMIN_ID:-narendaransg}"
+        SIGNING_KEY="${PLUSHIE_SIGNING_KEY:-}"
+
+        python3 - "$POSTER_ID" "$TITLE" "$MESSAGE" \
+            "$ADMIN_ID" "$SIGNING_KEY" <<'PY'
+import hashlib
+import json
+import sys
+
+poster_id, title, message, admin_id, signing_key = sys.argv[1:6]
+
+entry = {
+    "poster_id": poster_id,
+    "admin_id": admin_id,
+    "title": title,
+    "message": message,
+    "badge_tag": "ADMIN VERIFIED",
+    "min_version": 1
+}
+
+if signing_key:
+    payload = f"{poster_id}|{title}|{message}|{signing_key}"
+    entry["sha256"] = hashlib.sha256(
+        payload.encode("utf-8")
+    ).hexdigest()
+
+print(json.dumps({"posters": [entry]}, indent=2))
+PY
+        ;;
+
+    logs)
+        adb logcat -d \
+            -s SaveRoomAudio:I TextToSpeech:I MediaPlayer:I \
+            | tail -n 40
+        ;;
+
+    handoff)
+        cat "$REPO_ROOT/HANDOFF_PROMPT.md"
+        ;;
+
+    push)
+        MSG="${1:-chore(save-room): update app, scripts, and docs}"
+
+        cd "$REPO_ROOT" || exit 1
+
+        git rm -r --cached .gradle android_plushie/.gradle \
+            2>/dev/null || true
+
+        git add \
+            .gitignore \
+            README.md \
+            HANDOFF_PROMPT.md \
+            scripts/ \
+            android_plushie/app/src/main/ \
+            android_plushie/scripts/ \
+            android_plushie/README.md \
+            android_plushie/.gitignore \
+            themes/ \
+            config/ || exit 1
+
+        echo "=== FILES STAGED ==="
+        git status --short
+
+        echo "Review the staged files before committing."
+        read -r -p "Continue with commit and push? (y/N): " CONFIRM
+
+        if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
+            echo "Push cancelled. Staged files remain available."
+            exit 0
+        fi
+
+        git commit -m "$MSG" || exit 1
+        git push
+        ;;
+
+    help|*)
+        cat <<'HELP'
+==========================================
+       SAVE ROOM PLUSHIE ADMIN
+==========================================
+
+BUILD & ANDROID
+  plushie build
+  plushie update
+
+ADMIN POSTER
+  plushie post "drop-003" "NIGHT OPS" "Update live."
+
+ANDROID AUDIO LOGS
+  plushie logs
+
+FUTURE SESSION
+  plushie handoff
+
+GITHUB
+  plushie push "feat: update app"
+
+HELP
+        ;;
+esac
