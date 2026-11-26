@@ -37,21 +37,3 @@ The friend pack is exported to:
 `~/voice_plushie_editor/release/friend-pack/`
 
 Share `SaveRoomPlushie-debug.apk` and `FRIEND_INSTALL_GUIDE.txt` from that directory with testers.
-
-## Git & Admin Push Workflow
-
-From the repository root, review changes and stage only intended files:
-
-```bash
-cd ~/voice_plushie_editor
-git status --short
-git add .gitignore README.md HANDOFF_PROMPT.md
-git add android_plushie/app/src/main/
-git add android_plushie/scripts/
-git add android_plushie/README.md android_plushie/.gitignore
-git add themes/ config/ scripts/
-git status --short
-git diff --cached --stat
-git commit -m "docs: complete README and sync Save Room Plushie changes"
-git push origin main
-```
