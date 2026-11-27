@@ -2,235 +2,169 @@ package com.raccoon.plushie.audio
 
 import android.content.Context
 import android.media.AudioAttributes
-import android.media.AudioFormat
-import android.media.AudioManager
-import android.media.AudioTrack
 import android.media.MediaPlayer
 import android.media.SoundPool
-import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.speech.tts.TextToSpeech
 import android.util.Log
 import java.util.Locale
-import kotlin.math.PI
-import kotlin.math.sin
 
 class SaveRoomSoundEffects(private val context: Context) {
+
+    private val mainHandler = Handler(Looper.getMainLooper())
     private var tts: TextToSpeech? = null
     private var ttsReady = false
-    private var pendingLine: String? = null
     private var mediaPlayer: MediaPlayer? = null
-    private val mainHandler = Handler(Looper.getMainLooper())
 
-    private val audioAttrs = AudioAttributes.Builder()
+    private val attrs = AudioAttributes.Builder()
         .setUsage(AudioAttributes.USAGE_MEDIA)
-        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
         .build()
 
     private val soundPool: SoundPool = SoundPool.Builder()
-        .setMaxStreams(4)
-        .setAudioAttributes(audioAttrs)
-        .build()
-
-    private val soundIds = mutableMapOf<String, Int>()
-    private val loadedIds = mutableSetOf<Int>()
-
-    init {
-        soundPool.setOnLoadCompleteListener { _, sampleId, status ->
-            Log.i("SaveRoomAudio", "SoundPool load sampleId=$sampleId status=$status")
-            if (status == 0) {
-                loadedIds.add(sampleId)
+        .setMaxStreams(6)
+        .setAudioAttributes(attrs)
+        .build().apply {
+            setOnLoadCompleteListener { _, sampleId, status ->
+                Log.i("SaveRoomAudio", "SoundPool load sampleId=$sampleId status=$status")
             }
         }
-        loadRawSound("sfx_typewriter_save")
-        loadRawSound("sfx_herb_chime")
-        loadRawSound("sfx_shield_alert")
+
+    private val loadedIds = mutableMapOf<String, Int>()
+
+    init {
+        listOf(
+            "sfx_typewriter_save",
+            "sfx_herb_chime",
+            "sfx_shield_alert",
+            "sfx_level_up",
+            "sfx_tree_grow",
+            "sfx_ui_tap"
+        ).forEach { loadRawSound(it) }
 
         tts = TextToSpeech(context.applicationContext) { status ->
-            Log.i("SaveRoomAudio", "TTS init status=$status")
-            if (status == TextToSpeech.SUCCESS) {
+            ttsReady = (status == TextToSpeech.SUCCESS)
+            Log.i("SaveRoomAudio", "TTS init status=$status ready=$ttsReady")
+            if (ttsReady) {
                 tts?.language = Locale.US
-                tts?.setPitch(0.88f)
-                tts?.setSpeechRate(0.98f)
-                ttsReady = true
-                pendingLine?.let { line ->
-                    pendingLine = null
-                    speakPunchline(line)
-                }
             }
         }
     }
 
     private fun loadRawSound(name: String) {
         val resId = context.resources.getIdentifier(name, "raw", context.packageName)
-        Log.i("SaveRoomAudio", "Res lookup $name -> resId=$resId")
         if (resId != 0) {
-            try {
-                soundIds[name] = soundPool.load(context, resId, 1)
-            } catch (e: Exception) {
-                Log.i("SaveRoomAudio", "SoundPool load failed for $name: ${e.message}")
-            }
+            val id = soundPool.load(context, resId, 1)
+            loadedIds[name] = id
+        } else {
+            Log.w("SaveRoomAudio", "Missing raw resource: $name")
         }
     }
 
-    fun playOpeningPunchline() {
-        val rawId = context.resources.getIdentifier("sfx_re_intro", "raw", context.packageName)
-        Log.i("SaveRoomAudio", "playOpeningPunchline rawId=$rawId")
-        if (rawId != 0 && playRawIntroSync(rawId)) return
-        speakPunchline("Save room secured. Ink ribbon ready, stay sharp.")
-        playPcmChime(523.25, 659.25)
+    fun playUiTap() {
+        if (!playFromPool("sfx_ui_tap")) {
+            playRawFallback("sfx_ui_tap")
+        }
     }
 
     fun playTypewriterSave() {
-        Log.i("SaveRoomAudio", "playTypewriterSave")
         if (!playFromPool("sfx_typewriter_save")) {
-            playPcmChime(440.0, 880.0)
+            playRawFallback("sfx_typewriter_save")
         }
     }
 
-    fun playHerbOrShinyChime() {
-        Log.i("SaveRoomAudio", "playHerbOrShinyChime")
+    fun playHerbChime() {
         if (!playFromPool("sfx_herb_chime")) {
-            playPcmChime(587.33, 880.0)
+            playRawFallback("sfx_herb_chime")
         }
     }
 
     fun playShieldAlert() {
-        Log.i("SaveRoomAudio", "playShieldAlert")
         if (!playFromPool("sfx_shield_alert")) {
-            playPcmChime(311.13, 233.08)
+            playRawFallback("sfx_shield_alert")
+        }
+    }
+
+    fun playLevelUp() {
+        if (!playFromPool("sfx_level_up")) {
+            playRawFallback("sfx_level_up")
+        }
+    }
+
+    fun playTreeGrow() {
+        if (!playFromPool("sfx_tree_grow")) {
+            playRawFallback("sfx_tree_grow")
+        }
+    }
+
+    fun playOpeningPunchline(enableVoice: Boolean = false) {
+        Log.i("SaveRoomAudio", "playOpeningPunchline enableVoice=$enableVoice")
+        if (!playRawFallback("sfx_re_intro")) {
+            playHerbChime()
+        }
+        if (enableVoice && ttsReady) {
+            val code = tts?.speak(
+                "Save room secured. Stay sharp.",
+                TextToSpeech.QUEUE_FLUSH,
+                null,
+                "save_room_intro"
+            )
+            Log.i("SaveRoomAudio", "TTS speak code=$code")
         }
     }
 
     private fun playFromPool(key: String): Boolean {
-        val sid = soundIds[key] ?: return false
-        if (sid !in loadedIds) {
-            Log.i("SaveRoomAudio", "SoundPool sample not loaded yet: $key ($sid)")
-            return false
-        }
+        val sid = loadedIds[key] ?: return false
         return try {
-            val streamId = soundPool.play(sid, 1.0f, 1.0f, 1, 0, 1.0f)
+            val streamId = soundPool.play(sid, 0.92f, 0.92f, 1, 0, 1.0f)
             Log.i("SaveRoomAudio", "SoundPool play $key -> streamId=$streamId")
             streamId != 0
         } catch (e: Exception) {
-            Log.i("SaveRoomAudio", "SoundPool play error $key: ${e.message}")
+            Log.w("SaveRoomAudio", "SoundPool error for $key: ${e.message}")
             false
         }
     }
 
-    private fun playRawIntroSync(resId: Int): Boolean {
+    private fun playRawFallback(name: String): Boolean {
+        val rawId = context.resources.getIdentifier(name, "raw", context.packageName)
+        if (rawId == 0) return false
         return try {
             mediaPlayer?.release()
-            val afd = context.resources.openRawResourceFd(resId) ?: return false
-            val mp = MediaPlayer().apply {
-                setAudioAttributes(audioAttrs)
-                setDataSource(afd.fileDescriptor, afd.startOffset, afd.length)
-                afd.close()
-                prepare()
-                setOnCompletionListener { player ->
-                    player.release()
-                    if (mediaPlayer === player) mediaPlayer = null
-                }
-                start()
-            }
+            val mp = MediaPlayer.create(context, rawId) ?: return false
             mediaPlayer = mp
-            Log.i("SaveRoomAudio", "MediaPlayer started sfx_re_intro")
+            mp.setOnCompletionListener {
+                it.release()
+                if (mediaPlayer === it) mediaPlayer = null
+            }
+            mp.setOnErrorListener { player, what, extra ->
+                Log.w("SaveRoomAudio", "MediaPlayer error name=$name what=$what extra=$extra")
+                player.release()
+                if (mediaPlayer === player) mediaPlayer = null
+                true
+            }
+            mainHandler.post {
+                try {
+                    mp.start()
+                    Log.i("SaveRoomAudio", "MediaPlayer started $name")
+                } catch (e: Exception) {
+                    Log.w("SaveRoomAudio", "MediaPlayer start failed $name: ${e.message}")
+                }
+            }
             true
         } catch (e: Exception) {
-            Log.i("SaveRoomAudio", "MediaPlayer error: ${e.message}")
+            Log.w("SaveRoomAudio", "playRawFallback failed $name: ${e.message}")
             false
         }
-    }
-
-    private fun speakPunchline(text: String) {
-        if (ttsReady) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "re_intro_line")
-            } else {
-                @Suppress("DEPRECATION")
-                tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null)
-            }
-        } else {
-            pendingLine = text
-        }
-    }
-
-    private fun playPcmChime(freq1: Double, freq2: Double) {
-        Thread {
-            try {
-                val sampleRate = 22050
-                val durSamples = (sampleRate * 0.16).toInt()
-                val totalSamples = durSamples * 2
-                val pcm = ShortArray(totalSamples)
-                val freqs = doubleArrayOf(freq1, freq2)
-                for (segment in 0..1) {
-                    val f = freqs[segment]
-                    for (i in 0 until durSamples) {
-                        val env = sin(PI * i / (durSamples - 1).coerceAtLeast(1))
-                        val sample = sin(2.0 * PI * f * i / sampleRate) * 0.45 * env
-                        pcm[segment * durSamples + i] = (sample * Short.MAX_VALUE).toInt().toShort()
-                    }
-                }
-                val minBuf = AudioTrack.getMinBufferSize(
-                    sampleRate,
-                    AudioFormat.CHANNEL_OUT_MONO,
-                    AudioFormat.ENCODING_PCM_16BIT
-                ).coerceAtLeast(totalSamples * 2)
-
-                val track = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                    AudioTrack.Builder()
-                        .setAudioAttributes(audioAttrs)
-                        .setAudioFormat(
-                            AudioFormat.Builder()
-                                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                                .setSampleRate(sampleRate)
-                                .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                                .build()
-                        )
-                        .setBufferSizeInBytes(minBuf)
-                        .setTransferMode(AudioTrack.MODE_STREAM)
-                        .build()
-                } else {
-                    @Suppress("DEPRECATION")
-                    AudioTrack(
-                        AudioManager.STREAM_MUSIC,
-                        sampleRate,
-                        AudioFormat.CHANNEL_OUT_MONO,
-                        AudioFormat.ENCODING_PCM_16BIT,
-                        minBuf,
-                        AudioTrack.MODE_STREAM
-                    )
-                }
-
-                track.play()
-                track.write(pcm, 0, pcm.size)
-                Thread.sleep(360L)
-                track.stop()
-                track.release()
-                Log.i("SaveRoomAudio", "AudioTrack PCM chime played ($freq1 -> $freq2)")
-            } catch (e: Exception) {
-                Log.i("SaveRoomAudio", "AudioTrack error: ${e.message}")
-            }
-        }.start()
     }
 
     fun release() {
         mainHandler.removeCallbacksAndMessages(null)
-        try {
-            mediaPlayer?.release()
-        } catch (_: Exception) {
-        }
+        mediaPlayer?.release()
         mediaPlayer = null
-        try {
-            soundPool.release()
-        } catch (_: Exception) {
-        }
-        try {
-            tts?.stop()
-            tts?.shutdown()
-        } catch (_: Exception) {
-        }
+        soundPool.release()
+        tts?.stop()
+        tts?.shutdown()
         tts = null
     }
 }
